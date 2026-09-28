@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import './env.js';
 import { Command } from 'commander';
 import pc from 'picocolors';
 import fs from 'node:fs';
