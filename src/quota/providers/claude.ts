@@ -1,4 +1,5 @@
 import { execa } from 'execa';
+import { rollForwardIfStale } from '../types.js';
 import type { ClaudeLiveUsage, QuotaBucket, RunnerLiveUsage, UsageProvider } from '../types.js';
 
 export class ClaudeUsageProvider implements UsageProvider {
@@ -44,10 +45,7 @@ export class ClaudeUsageProvider implements UsageProvider {
 
       const target = new Date();
       target.setHours(hour, minute, 0, 0);
-      if (target.getTime() <= Date.now()) {
-        target.setDate(target.getDate() + 1);
-      }
-      return target;
+      return rollForwardIfStale(target);
     }
 
     // 4. Check 24-hour time string like "17:00"
@@ -57,10 +55,7 @@ export class ClaudeUsageProvider implements UsageProvider {
       const minute = parseInt(time24Match[2], 10);
       const target = new Date();
       target.setHours(hour, minute, 0, 0);
-      if (target.getTime() <= Date.now()) {
-        target.setDate(target.getDate() + 1);
-      }
-      return target;
+      return rollForwardIfStale(target);
     }
 
     return undefined;

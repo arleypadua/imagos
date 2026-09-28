@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import {
   DEFAULT_RESET_BUFFER_MS,
+  rollForwardIfStale,
   type ClaudeLiveUsage,
   type QuotaMonitorOptions,
   type QuotaStatus,
@@ -21,7 +22,8 @@ export class QuotaMonitor extends EventEmitter {
   private resetAt?: Date;
   private pauseReason?: string;
   private activePids: Map<number, string> = new Map();
-  private resumeTimeout?: NodeJS.Timeout;
+  private stoppedPids: Set<number> = new Set();
+  private resumeTimers: Map<string, NodeJS.Timeout> = new Map();
   private providers: Map<string, UsageProvider> = new Map();
   private runnerUsages: Map<string, RunnerLiveUsage> = new Map();
   private pausedRunners: Map<string, RunnerPauseInfo> = new Map();
@@ -120,6 +122,7 @@ export class QuotaMonitor extends EventEmitter {
 
   public unregisterPid(pid: number): void {
     this.activePids.delete(pid);
+    this.stoppedPids.delete(pid);
   }
 
   public checkOutputForRateLimit(text: string): { isRateLimited: boolean; resetAt?: Date; reason?: string } {
@@ -193,10 +196,7 @@ export class QuotaMonitor extends EventEmitter {
 
         const target = new Date();
         target.setHours(hour, minute, 0, 0);
-        if (target.getTime() <= Date.now()) {
-          target.setDate(target.getDate() + 1);
-        }
-        resetAt = target;
+        resetAt = rollForwardIfStale(target);
       }
     }
 
@@ -212,6 +212,16 @@ export class QuotaMonitor extends EventEmitter {
     };
   }
 
+  public getEligibleRunners(): string[] {
+    return Array.from(this.providers.keys()).filter((name) => this.isRunnerAllowed(name));
+  }
+
+  public areAllRunnersPaused(): boolean {
+    const eligible = this.getEligibleRunners();
+    if (eligible.length === 0) return false;
+    return eligible.every((name) => this.isRunnerPaused(name));
+  }
+
   public isRunnerPaused(runnerName: string): boolean {
     const pauseInfo = this.pausedRunners.get(runnerName.toLowerCase());
     if (!pauseInfo) return false;
@@ -222,6 +232,31 @@ export class QuotaMonitor extends EventEmitter {
     }
 
     return true;
+  }
+
+  private prunePausedRunners(): void {
+    for (const name of Array.from(this.pausedRunners.keys())) {
+      this.isRunnerPaused(name);
+    }
+  }
+
+  // Nothing else notices a runner that was stopped but never resumed: the pause is gone from the map while
+  // its processes are still frozen, so the daemon reports itself healthy and the workers never move again.
+  public reconcileStoppedProcesses(): void {
+    this.prunePausedRunners();
+
+    for (const pid of Array.from(this.stoppedPids)) {
+      const runner = this.activePids.get(pid);
+      if (runner && this.isRunnerPaused(runner)) {
+        continue;
+      }
+      try {
+        process.kill(pid, 'SIGCONT');
+      } catch {
+        // Process might have terminated
+      }
+      this.stoppedPids.delete(pid);
+    }
   }
 
   public triggerQuotaPause(
@@ -236,6 +271,13 @@ export class QuotaMonitor extends EventEmitter {
       return;
     }
     const effectiveResetAt = new Date(resetAt.getTime() + bufferMs);
+
+    // A reset that has already passed describes a window that has already rolled. Pausing on it stops the
+    // runners for a window they are no longer inside, and the resume it can schedule is a 1s no-op.
+    if (effectiveResetAt.getTime() <= Date.now()) {
+      return;
+    }
+
     const existing = this.pausedRunners.get(rName);
 
     // If already paused and the reset time is effectively unchanged (within 60s), do not re-trigger/spam events
@@ -266,6 +308,7 @@ export class QuotaMonitor extends EventEmitter {
       if (runner === rName) {
         try {
           process.kill(pid, 'SIGSTOP');
+          this.stoppedPids.add(pid);
         } catch {
           // Process may have already exited
         }
@@ -273,6 +316,22 @@ export class QuotaMonitor extends EventEmitter {
     }
 
     const waitMs = Math.max(1000, effectiveResetAt.getTime() - Date.now());
+
+    // Scheduled before the event goes out: a listener that throws must not leave the runners stopped
+    // with no resume on the clock.
+    const existingTimer = this.resumeTimers.get(rName);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    this.resumeTimers.set(
+      rName,
+      setTimeout(() => {
+        this.resumeTimers.delete(rName);
+        this.resumeFromQuota(rName);
+      }, waitMs)
+    );
+
     this.emit('quota_paused', {
       pausedAt: this.pausedAt,
       resetAt: this.resetAt,
@@ -281,14 +340,6 @@ export class QuotaMonitor extends EventEmitter {
       waitMs,
       affectedIssues,
     });
-
-    if (this.resumeTimeout) {
-      clearTimeout(this.resumeTimeout);
-    }
-
-    this.resumeTimeout = setTimeout(() => {
-      this.resumeFromQuota(rName);
-    }, waitMs);
   }
 
   public resumeFromQuota(runnerName?: string, isManual: boolean = false): void {
@@ -300,10 +351,22 @@ export class QuotaMonitor extends EventEmitter {
       this.setRunnerOverride(targetRunner, true, until);
     }
 
+    const clearTimerFor = (name: string) => {
+      const timer = this.resumeTimers.get(name);
+      if (timer) {
+        clearTimeout(timer);
+        this.resumeTimers.delete(name);
+      }
+    };
+
     if (targetRunner) {
       this.pausedRunners.delete(targetRunner);
+      clearTimerFor(targetRunner);
     } else {
       this.pausedRunners.clear();
+      for (const name of Array.from(this.resumeTimers.keys())) {
+        clearTimerFor(name);
+      }
     }
 
     // Send SIGCONT to resume frozen child PIDs of this runner
@@ -314,22 +377,17 @@ export class QuotaMonitor extends EventEmitter {
         } catch {
           // Process might have terminated
         }
+        this.stoppedPids.delete(pid);
       }
     }
 
-    if (this.pausedRunners.size === 0) {
-      if (this.resumeTimeout) {
-        clearTimeout(this.resumeTimeout);
-        this.resumeTimeout = undefined;
-      }
+    const previousResetAt = this.resetAt;
 
-      const previousResetAt = this.resetAt;
+    if (this.pausedRunners.size === 0) {
       this.isPaused = false;
       this.pausedAt = undefined;
       this.resetAt = undefined;
       this.pauseReason = undefined;
-
-      this.emit('quota_resumed', { resumedAt: new Date(), previousResetAt, runnerName: targetRunner });
     } else {
       // Pick the next soonest reset among remaining paused runners
       const nextPaused = Array.from(this.pausedRunners.values()).sort(
@@ -338,10 +396,18 @@ export class QuotaMonitor extends EventEmitter {
       this.resetAt = nextPaused.resetAt;
       this.pauseReason = nextPaused.reason;
     }
+
+    this.emit('quota_resumed', { resumedAt: new Date(), previousResetAt, runnerName: targetRunner });
   }
 
   public async fetchLiveUsage(forceRefresh = false): Promise<ClaudeLiveUsage | null> {
+    this.reconcileStoppedProcesses();
+
     for (const [name, provider] of this.providers.entries()) {
+      if (!this.isRunnerAllowed(name)) {
+        this.runnerUsages.delete(name);
+        continue;
+      }
       try {
         const isAvailable = provider.isAvailable ? await provider.isAvailable() : true;
         if (!isAvailable) {
@@ -430,6 +496,8 @@ export class QuotaMonitor extends EventEmitter {
   }
 
   public getStatus(): QuotaStatus {
+    this.prunePausedRunners();
+
     const runnerUsageRecord: Record<string, RunnerLiveUsage> = {};
     for (const [key, value] of this.runnerUsages.entries()) {
       runnerUsageRecord[key] = value;
@@ -446,6 +514,7 @@ export class QuotaMonitor extends EventEmitter {
 
     return {
       isPaused: this.pausedRunners.size > 0,
+      allRunnersPaused: this.areAllRunnersPaused(),
       pausedAt: this.pausedAt,
       resetAt: this.resetAt,
       reason: this.pauseReason,

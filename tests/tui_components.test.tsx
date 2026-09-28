@@ -792,7 +792,7 @@ describe('TUI Components', () => {
     const output = lastFrame();
     expect(output).toContain('COMMAND PALETTE');
     expect(output).toContain('/enqueue');
-    expect(output).toContain('Enqueue an issue into priority queue');
+    expect(output).toContain('Queue an issue first');
   });
 
   it('should render Needs Triage section in MasterDashboard under Issue DAG Queue', () => {

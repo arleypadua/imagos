@@ -53,6 +53,123 @@ describe('Orchestrator Manual Issue Enqueueing', () => {
     expect(orchestrator.getPriorityQueue()).toContain(10);
   });
 
+  describe('--now (extra worker slot)', () => {
+    const readyIssue = (number: number): GitHubIssue => ({
+      number,
+      title: `Feature ${number}`,
+      body: '',
+      state: 'OPEN',
+      labels: [{ name: 'ready-for-agent' }],
+      url: `https://github.com/owner/repo/issues/${number}`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    it('should grant a pending burst slot to the enqueued issue', async () => {
+      orchestrator.getDAG().build([readyIssue(10)]);
+
+      const result = await orchestrator.enqueueTask(10, { now: true });
+
+      expect(result.success).toBe(true);
+      expect(result.message).toContain('extra worker slot');
+      expect(orchestrator.getBurstSlots().pending).toEqual([10]);
+    });
+
+    it('should not grant a slot unless asked', async () => {
+      orchestrator.getDAG().build([readyIssue(10)]);
+
+      await orchestrator.enqueueTask(10);
+
+      expect(orchestrator.getBurstSlots().pending).toEqual([]);
+    });
+
+    it('should exempt a running burst task from the concurrency ceiling', () => {
+      const active = (orchestrator as any).activeTaskNumbers as Set<number>;
+      const burstRunning = (orchestrator as any).burstTaskNumbers as Set<number>;
+
+      expect(orchestrator.getAvailableSlots()).toBe(2);
+
+      active.add(1);
+      active.add(2);
+      expect(orchestrator.getAvailableSlots()).toBe(0);
+
+      // A third task dispatched on a burst slot must not consume one of the two normal slots
+      active.add(3);
+      burstRunning.add(3);
+      expect(orchestrator.getAvailableSlots()).toBe(0);
+
+      // The ceiling returns on its own when the burst task ends
+      active.delete(3);
+      burstRunning.delete(3);
+      active.delete(2);
+      expect(orchestrator.getAvailableSlots()).toBe(1);
+    });
+
+    it('should add a slot to an issue that is already queued', async () => {
+      orchestrator.getDAG().build([readyIssue(10)]);
+
+      await orchestrator.enqueueTask(10);
+      const result = await orchestrator.enqueueTask(10, { now: true });
+
+      expect(result.success).toBe(true);
+      expect(orchestrator.getBurstSlots().pending).toEqual([10]);
+      expect(orchestrator.getPriorityQueue().filter((n) => n === 10)).toHaveLength(1);
+    });
+
+    it('should still refuse a plain repeat of an already queued issue', async () => {
+      orchestrator.getDAG().build([readyIssue(10)]);
+
+      await orchestrator.enqueueTask(10);
+      const result = await orchestrator.enqueueTask(10);
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain('already in the priority queue');
+    });
+  });
+
+  describe('--runner (runner override)', () => {
+    const readyIssue = (number: number, labels: { name: string }[] = [{ name: 'ready-for-agent' }]): GitHubIssue => ({
+      number,
+      title: `Feature ${number}`,
+      body: '',
+      state: 'OPEN',
+      labels,
+      url: `https://github.com/owner/repo/issues/${number}`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    it('should record the override for the enqueued issue', async () => {
+      orchestrator.getDAG().build([readyIssue(10)]);
+
+      const result = await orchestrator.enqueueTask(10, { runner: 'agy' });
+
+      expect(result.success).toBe(true);
+      expect(result.message).toContain('agy');
+      expect(orchestrator.getRunnerOverrides()).toEqual({ 10: 'agy' });
+    });
+
+    it('should win over the runner label on the issue', async () => {
+      orchestrator.getDAG().build([
+        readyIssue(10, [{ name: 'ready-for-agent' }, { name: 'runner:claude' }]),
+      ]);
+
+      await orchestrator.enqueueTask(10, { runner: 'agy' });
+
+      expect((orchestrator as any).runnerFor(orchestrator.getDAG().getNode(10)!.issue)).toBe('agy');
+    });
+
+    it('should refuse a runner that is not registered', async () => {
+      orchestrator.getDAG().build([readyIssue(10)]);
+
+      const result = await orchestrator.enqueueTask(10, { runner: 'gpt5' });
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain('Unknown or disallowed runner');
+      expect(orchestrator.getPriorityQueue()).not.toContain(10);
+    });
+  });
+
   it('detects blocked issues and requires confirmation without force flag', async () => {
     const issues: GitHubIssue[] = [
       {
@@ -68,7 +185,8 @@ describe('Orchestrator Manual Issue Enqueueing', () => {
       {
         number: 21,
         title: 'Dependent task',
-        body: 'Depends on #20',
+        body: '',
+        blockedBy: [{ number: 20 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/21',
@@ -95,7 +213,8 @@ describe('Orchestrator Manual Issue Enqueueing', () => {
       {
         number: 100,
         title: 'Parent Spec Feature',
-        body: 'Spec breakdown:\n- [ ] #101\n- [ ] #102',
+        body: '',
+        subIssues: [{ number: 101 }, { number: 102 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/100',

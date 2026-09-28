@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { QuotaMonitor } from '../src/quota/monitor.js';
 
 describe('QuotaMonitor', () => {
@@ -355,6 +355,154 @@ describe('QuotaMonitor', () => {
       monitor.triggerQuotaPause(resetTime, 'Session limit reached', 'claude');
       expect(monitor.isRunnerPaused('claude')).toBe(false);
       expect(pausedEvents).toHaveLength(0);
+    });
+  });
+  describe('Stale pause recovery', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it('should not stop a runner for a reset window that has already passed', () => {
+      const monitor = new QuotaMonitor();
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      const pausedEvents: any[] = [];
+      monitor.on('quota_paused', (e) => pausedEvents.push(e));
+      monitor.registerPid(4509, 'claude');
+
+      monitor.triggerQuotaPause(new Date(Date.now() - 10 * 60 * 1000), 'Session limit', 'claude', [384]);
+
+      expect(kill).not.toHaveBeenCalled();
+      expect(pausedEvents).toHaveLength(0);
+      expect(monitor.isRunnerPaused('claude')).toBe(false);
+      expect(monitor.getStatus().isPaused).toBe(false);
+    });
+
+    it('should not report a pause whose reset time has passed', () => {
+      vi.useFakeTimers({ shouldAdvanceTime: false });
+      const monitor = new QuotaMonitor();
+      vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+      monitor.triggerQuotaPause(new Date(Date.now() + 60 * 60 * 1000), 'Session limit', 'claude');
+      expect(monitor.getStatus().isPaused).toBe(true);
+
+      // Clock moves past the reset without the scheduled timer ever running
+      vi.setSystemTime(Date.now() + 2 * 60 * 60 * 1000);
+
+      const status = monitor.getStatus();
+      expect(status.isPaused).toBe(false);
+      expect(status.pausedRunner).toBeUndefined();
+    });
+
+    it('should SIGCONT a stopped process whose runner is no longer paused on the next usage poll', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: false });
+      const monitor = new QuotaMonitor();
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      for (const name of ['claude', 'agy']) {
+        const provider = monitor.getProvider(name) as any;
+        provider.isAvailable = async () => false;
+        provider.fetchUsage = async () => null;
+      }
+      monitor.registerPid(4522, 'claude');
+
+      monitor.triggerQuotaPause(new Date(Date.now() + 60 * 60 * 1000), 'Session limit', 'claude');
+      expect(kill).toHaveBeenCalledWith(4522, 'SIGSTOP');
+
+      // The scheduled resume never runs: the clock passes the reset with the timer lost
+      vi.setSystemTime(Date.now() + 2 * 60 * 60 * 1000);
+      await monitor.fetchLiveUsage();
+
+      expect(kill).toHaveBeenCalledWith(4522, 'SIGCONT');
+      expect(monitor.isRunnerPaused('claude')).toBe(false);
+    });
+
+    it('should schedule the resume even when a quota_paused listener throws', () => {
+      vi.useFakeTimers();
+      const monitor = new QuotaMonitor();
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      monitor.registerPid(4509, 'claude');
+      monitor.on('quota_paused', () => {
+        throw new Error('notifier blew up');
+      });
+
+      expect(() =>
+        monitor.triggerQuotaPause(new Date(Date.now() + 60 * 1000), 'Session limit', 'claude')
+      ).toThrow('notifier blew up');
+      expect(kill).toHaveBeenCalledWith(4509, 'SIGSTOP');
+
+      vi.advanceTimersByTime(4 * 60 * 1000);
+
+      expect(kill).toHaveBeenCalledWith(4509, 'SIGCONT');
+      expect(monitor.isRunnerPaused('claude')).toBe(false);
+    });
+
+    it('should read a just-passed reset as the window that rolled, not tomorrow', () => {
+      const monitor = new QuotaMonitor();
+      const provider = monitor.getProvider('claude') as any;
+
+      const now = new Date();
+      now.setHours(19, 52, 0, 0);
+      vi.useFakeTimers({ shouldAdvanceTime: false });
+      vi.setSystemTime(now);
+
+      const { liveUsage } = provider.parseUsageOutput(
+        'Current session: 99% used · resets 7:50pm (Europe/Amsterdam)'
+      );
+
+      const ageMs = Date.now() - liveUsage.sessionResetAt!.getTime();
+      expect(ageMs).toBe(2 * 60 * 1000);
+    });
+  });
+
+  describe('Per-runner pause independence', () => {
+    it('should not pause or SIGSTOP a healthy runner when another runner hits its threshold', () => {
+      const monitor = new QuotaMonitor({ pauseOnLimit: true });
+
+      monitor.triggerQuotaPause(new Date(Date.now() + 4 * 24 * 60 * 60 * 1000), 'AGY weekly quota', 'agy');
+
+      expect(monitor.isRunnerPaused('agy')).toBe(true);
+      expect(monitor.isRunnerPaused('claude')).toBe(false);
+      expect(monitor.areAllRunnersPaused()).toBe(false);
+      expect(monitor.getStatus().isPaused).toBe(true);
+      expect(monitor.getStatus().allRunnersPaused).toBe(false);
+    });
+
+    it('should keep each runner on its own resume timer', () => {
+      const monitor = new QuotaMonitor({ pauseOnLimit: true });
+      const timers = (monitor as any).resumeTimers as Map<string, unknown>;
+
+      monitor.triggerQuotaPause(new Date(Date.now() + 60 * 60 * 1000), 'Claude session limit', 'claude');
+      const claudeTimer = timers.get('claude');
+      expect(claudeTimer).toBeDefined();
+
+      // A later pause on another runner must not cancel the first runner's scheduled resume
+      monitor.triggerQuotaPause(new Date(Date.now() + 4 * 24 * 60 * 60 * 1000), 'AGY weekly quota', 'agy');
+
+      expect(timers.get('claude')).toBe(claudeTimer);
+      expect(timers.get('agy')).toBeDefined();
+      expect(monitor.areAllRunnersPaused()).toBe(true);
+
+      monitor.resumeFromQuota('claude');
+
+      expect(timers.has('claude')).toBe(false);
+      expect(timers.get('agy')).toBeDefined();
+      expect(monitor.isRunnerPaused('agy')).toBe(true);
+      expect(monitor.areAllRunnersPaused()).toBe(false);
+    });
+
+    it('should emit quota_resumed for a runner even while another stays paused', () => {
+      const monitor = new QuotaMonitor({ pauseOnLimit: true });
+      const resumed: (string | undefined)[] = [];
+      monitor.on('quota_resumed', ({ runnerName }: { runnerName?: string }) => resumed.push(runnerName));
+
+      monitor.triggerQuotaPause(new Date(Date.now() + 60 * 60 * 1000), 'Claude session limit', 'claude');
+      monitor.triggerQuotaPause(new Date(Date.now() + 4 * 24 * 60 * 60 * 1000), 'AGY weekly quota', 'agy');
+
+      monitor.resumeFromQuota('claude');
+
+      expect(resumed).toEqual(['claude']);
+      expect(monitor.isRunnerPaused('claude')).toBe(false);
+      expect(monitor.isRunnerPaused('agy')).toBe(true);
     });
   });
 });

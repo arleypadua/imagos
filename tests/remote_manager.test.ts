@@ -228,6 +228,15 @@ class MockActionController implements RemoteActionController {
     };
   }
 
+  public getBrowseIssues(): any {
+    return [
+      { number: 30, title: 'bug: fix edge case' },
+      { number: 22, title: 'Epic: Remote Control' },
+      { number: 24, title: 'feat: notifications' },
+      { number: 25, title: 'feat: quota alert' },
+    ];
+  }
+
   public getIssueTreeSummary(): any {
     return {
       specs: [
@@ -942,70 +951,42 @@ describe('RemoteControlManager', () => {
       expect(msg.text).toContain('`/logs 26`');
     });
 
-    it('/browse command returns full issue hierarchy tree with interactive navigation buttons', async () => {
+    it('/browse command lists open issues by priority with number, title and link', async () => {
       await provider.triggerCommand('browse', [], 123456);
 
       expect(provider.sentMessages.length).toBe(1);
       const msg = provider.sentMessages[0];
-      expect(msg.text).toContain('[arleypadua/imagos] 🌳 *Issue Tree Browser*');
-      expect(msg.text).toContain('📁 *Specifications* (1):');
-      expect(msg.text).toContain('*#22* - *Epic: Remote Control* _(1/3 complete)_');
-      expect(msg.text).toContain('📄 *Standalone Issues* (1):');
-      expect(msg.text).toContain('• 🟢 *#30* - bug: fix edge case');
+      expect(msg.text).toContain('[arleypadua/imagos] 📋 *Issues by priority* (4) — page 1/1');
+      expect(msg.text.split('\n').filter((l: string) => l.startsWith('[#'))).toEqual([
+        '[#30](https://github.com/arleypadua/imagos/issues/30) bug: fix edge case',
+        '[#22](https://github.com/arleypadua/imagos/issues/22) Epic: Remote Control',
+        '[#24](https://github.com/arleypadua/imagos/issues/24) feat: notifications',
+        '[#25](https://github.com/arleypadua/imagos/issues/25) feat: quota alert',
+      ]);
 
       const actions = msg.options?.actions;
-      expect(actions).toBeDefined();
-      expect(actions!.some((row) => row.some((b) => b.label.includes('#22') && b.payload.startsWith('v1:b:s:22')))).toBe(true);
-      expect(actions!.some((row) => row.some((b) => b.label.includes('Filter: Open Only')))).toBe(true);
-      expect(actions!.some((row) => row.some((b) => b.label.includes('#30') && b.payload.startsWith('v1:enq:30')))).toBe(true);
       expect(actions!.some((row) => row.some((b) => b.label.includes('GitHub Backlog')))).toBe(true);
+      expect(actions!.some((row) => row.some((b) => b.payload.startsWith('v1:b:p:')))).toBe(false);
     });
 
-    it('handles interactive browse actions: drill-down into spec, toggle filter, and back to tree', async () => {
-      // 1. Initial /browse command
-      await provider.triggerCommand('browse', [], 123456);
-      expect(provider.sentMessages.length).toBe(1);
-      const initialMessageId = 1;
+    it('pages through issues in place when a navigation button is tapped', async () => {
+      actionController.getBrowseIssues = () =>
+        Array.from({ length: 12 }, (_, i) => ({ number: i + 1, title: `issue ${i + 1}` }));
 
-      // 2. Tap on Spec #22 drill-down button
-      await provider.triggerAction('v1:b:s:22:0', 123456, {
-        messageId: initialMessageId,
-        chatId: 123456,
-      });
+      await provider.triggerCommand('browse', [], 123456);
+      const first = provider.sentMessages[0];
+      expect(first.text).toContain('page 1/2');
+      expect(first.options?.actions?.[0]?.[0]?.payload).toBe('v1:b:p:2');
+
+      await provider.triggerAction('v1:b:p:2', 123456, { messageId: 1, chatId: 123456 });
 
       expect(provider.editedMessages.length).toBe(1);
-      const specMsg = provider.editedMessages[0];
-      expect(specMsg.messageId).toBe(initialMessageId);
-      expect(specMsg.text).toContain('Spec #22: Epic: Remote Control');
-      expect(specMsg.text).toContain('├── 🟢 *#24* - feat: notifications');
-      expect(specMsg.text).toContain('├── 🟢 *#25* - feat: quota alert');
-      expect(specMsg.text).toContain('└── ✔️ *#23* - feat: initial setup _(closed)_');
-      expect(specMsg.options?.actions?.some((row) => row.some((b) => b.label.includes('Back to Tree')))).toBe(true);
-      expect(specMsg.options?.actions?.some((row) => row.some((b) => b.label.includes('Enqueue All 2 Open Tasks')))).toBe(true);
-
-      // 3. Tap "Back to Tree" button
-      await provider.triggerAction('v1:b:r:0', 123456, {
-        messageId: initialMessageId,
-        chatId: 123456,
-      });
-
-      expect(provider.editedMessages.length).toBe(2);
-      const rootMsg = provider.editedMessages[1];
-      expect(rootMsg.messageId).toBe(initialMessageId);
-      expect(rootMsg.text).toContain('🌳 *Issue Tree Browser*');
-
-      // 4. Tap Filter Toggle button
-      await provider.triggerAction('v1:b:t:0', 123456, {
-        messageId: initialMessageId,
-        chatId: 123456,
-      });
-
-      expect(provider.editedMessages.length).toBe(3);
-      const toggledMsg = provider.editedMessages[2];
-      expect(toggledMsg.messageId).toBe(initialMessageId);
-      expect(toggledMsg.text).toContain('Showing Open Only');
-      expect(toggledMsg.options?.actions?.some((row) => row.some((b) => b.label.includes('Show All Tasks')))).toBe(true);
+      const paged = provider.editedMessages[0];
+      expect(paged.messageId).toBe(1);
+      expect(paged.text).toContain('page 2/2');
+      expect(paged.text).toContain('[#11](https://github.com/arleypadua/imagos/issues/11) issue 11');
+      expect(paged.text).not.toContain('issue 10');
+      expect(paged.options?.actions?.[0]?.[0]?.payload).toBe('v1:b:p:1');
     });
   });
 });
-

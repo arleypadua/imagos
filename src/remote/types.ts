@@ -150,6 +150,11 @@ export interface StandaloneIssueSummary {
   blockers?: number[];
 }
 
+export interface BrowseIssueSummary {
+  number: number;
+  title: string;
+}
+
 export interface IssueTreeSummary {
   specs: SpecTreeSummary[];
   standaloneIssues: StandaloneIssueSummary[];
@@ -170,6 +175,7 @@ export interface RemoteActionController {
   getTasksSummary?(): TasksSummary;
   getSpecsSummary?(): SpecsSummary;
   getIssueTreeSummary?(): IssueTreeSummary;
+  getBrowseIssues?(): BrowseIssueSummary[];
   cleanWorktrees?(): Promise<{ success: boolean; message: string; count?: number }>;
   getInspectSummary?(issueNumber?: number): Promise<string>;
   getLogsSummary?(issueNumber: number, tailLines?: number): Promise<string>;

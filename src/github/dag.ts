@@ -1,5 +1,6 @@
 import type { AutoPilotConfig, DAGNode, GitHubIssue, TaskStatus } from '../types/index.js';
 import { parseIssueDependencies } from './parser.js';
+import { createPriorityContext, sortByPriority } from './priority.js';
 
 export class IssueDAG {
   private nodes: Map<number, DAGNode> = new Map();
@@ -66,18 +67,29 @@ export class IssueDAG {
       // Connect parent to children
       if (node.parentNumber) {
         const parentNode = this.nodes.get(node.parentNumber);
-        if (parentNode && !parentNode.children.includes(issueNumber)) {
-          parentNode.children.push(issueNumber);
+        if (parentNode) {
+          if (!parentNode.children.includes(issueNumber)) {
+            parentNode.children.push(issueNumber);
+          }
+          parentNode.kind = 'spec';
         }
       }
 
       // Connect children to parent
       for (const childId of node.children) {
         const childNode = this.nodes.get(childId);
-        if (childNode && childNode.parentNumber === undefined) {
-          childNode.parentNumber = issueNumber;
-          childNode.kind = 'ticket';
+        if (childNode) {
+          if (childNode.parentNumber === undefined) {
+            childNode.parentNumber = issueNumber;
+          }
+          if (childNode.kind !== 'spec') {
+            childNode.kind = 'ticket';
+          }
         }
+      }
+
+      if (node.children.length > 0) {
+        node.kind = 'spec';
       }
     }
 
@@ -182,16 +194,31 @@ export class IssueDAG {
   }
 
   public getSpecChildIssueNumbers(specNumber: number): number[] {
-    const specNode = this.nodes.get(specNumber);
-    const children = new Set<number>(specNode?.children || []);
+    const result = new Set<number>();
+    const queue = [specNumber];
+    const visited = new Set<number>([specNumber]);
 
-    for (const node of this.nodes.values()) {
-      if (node.parentNumber === specNumber) {
-        children.add(node.issue.number);
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      const node = this.nodes.get(current);
+      const directChildren = new Set<number>(node?.children || []);
+
+      for (const n of this.nodes.values()) {
+        if (n.parentNumber === current) {
+          directChildren.add(n.issue.number);
+        }
+      }
+
+      for (const childId of directChildren) {
+        if (!visited.has(childId)) {
+          visited.add(childId);
+          result.add(childId);
+          queue.push(childId);
+        }
       }
     }
 
-    return Array.from(children);
+    return Array.from(result);
   }
 
   public isSpecComplete(specNumber: number): {
@@ -205,10 +232,17 @@ export class IssueDAG {
       return { isComplete: false, totalTickets: 0, completedTickets: 0, pendingTickets: [] };
     }
 
+    const leafTicketIds = childIds.filter((id) => {
+      const node = this.nodes.get(id);
+      return !node || (node.kind !== 'spec' && node.children.length === 0);
+    });
+
+    const targetList = leafTicketIds.length > 0 ? leafTicketIds : childIds;
+
     const pendingTickets: number[] = [];
     let completedTickets = 0;
 
-    for (const id of childIds) {
+    for (const id of targetList) {
       const node = this.nodes.get(id);
       if (!node || node.status !== 'completed') {
         pendingTickets.push(id);
@@ -219,7 +253,7 @@ export class IssueDAG {
 
     return {
       isComplete: pendingTickets.length === 0,
-      totalTickets: childIds.length,
+      totalTickets: targetList.length,
       completedTickets,
       pendingTickets,
     };
@@ -271,7 +305,9 @@ export class IssueDAG {
   }
 
   public getReadyNodes(): DAGNode[] {
-    let nodes = this.getAllNodes().filter((n: DAGNode) => n.status === 'ready');
+    let nodes = this.getAllNodes().filter(
+      (n: DAGNode) => n.status === 'ready' && n.kind !== 'spec' && n.children.length === 0
+    );
     const targetSpecs = this.getTargetSpecs();
 
     if (targetSpecs.length > 0) {
@@ -285,7 +321,12 @@ export class IssueDAG {
       nodes = nodes.filter((n: DAGNode) => childIds.has(n.issue.number));
     }
 
-    return nodes;
+    return sortByPriority(nodes, createPriorityContext(this.nodes));
+  }
+
+  public getOpenNodesByPriority(): DAGNode[] {
+    const nodes = this.getAllNodes().filter((n: DAGNode) => n.issue.state === 'OPEN');
+    return sortByPriority(nodes, createPriorityContext(this.nodes));
   }
 
   public getBlockedNodes(): DAGNode[] {

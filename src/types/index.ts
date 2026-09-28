@@ -294,6 +294,8 @@ export interface AutoPilotConfig {
 
 export interface EnqueueTaskOptions {
   force?: boolean;
+  now?: boolean;
+  runner?: string;
 }
 export type TaskEnqueueOptions = EnqueueTaskOptions;
 

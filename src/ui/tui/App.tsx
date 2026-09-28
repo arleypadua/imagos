@@ -1,5 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { useInput, useApp } from 'ink';
+import {
+  ENQUEUE_EXAMPLES,
+  ENQUEUE_SUMMARY,
+  ENQUEUE_USAGE,
+  formatEnqueueFlagLines,
+  parseEnqueueArgs,
+} from '../../pipeline/enqueue_help.js';
 import { Orchestrator } from '../../pipeline/orchestrator.js';
 import { AgentEventBus, type AgentEvent } from '../../events/bus.js';
 import { loadHistoricalEvents } from '../../events/history.js';
@@ -465,34 +472,44 @@ export const App: React.FC<AppProps> = ({ orchestrator, onExit }) => {
       cmd.startsWith('force-run')
     ) {
       const parts = rawCmd.trim().split(/\s+/);
-      const args = parts.slice(1);
+      const parsedArgs = parseEnqueueArgs(parts.slice(1));
       const force =
-        args.some((a) => a === '--force' || a === '-f') ||
-        parts[0] === '/force-run' ||
-        parts[0] === 'force-run';
-      const issueArg = args.find((a) => a !== '--force' && a !== '-f');
+        parsedArgs.force || parts[0] === '/force-run' || parts[0] === 'force-run';
+      const { now, runner, unknownFlags } = parsedArgs;
 
-      if (!issueArg) {
+      if (unknownFlags.length > 0) {
+        setCommandResult({
+          type: 'error',
+          title: '⚠️ Unknown Option',
+          lines: [
+            `Not recognised: ${unknownFlags.join(', ')}`,
+            `Usage: ${ENQUEUE_USAGE}`,
+            ...formatEnqueueFlagLines('  ', false),
+          ],
+        });
+        return;
+      }
+
+      if (parsedArgs.issueNumber === undefined) {
         setCommandResult({
           type: 'error',
           title: '⚠️ Missing Issue Number',
-          lines: ['Usage: /enqueue <issueNumber> [--force] (e.g. /enqueue 42 or /run 42 --force)'],
+          lines: [
+            `Usage: ${ENQUEUE_USAGE}`,
+            ENQUEUE_SUMMARY,
+            ...formatEnqueueFlagLines('  ', false),
+            '',
+            'Examples:',
+            ...ENQUEUE_EXAMPLES.map((e) => `  ${e}`),
+          ],
         });
         return;
       }
 
-      const issueNum = parseInt(issueArg.replace(/^#/, ''), 10);
-      if (isNaN(issueNum)) {
-        setCommandResult({
-          type: 'error',
-          title: '⚠️ Invalid Issue Number',
-          lines: [`"${issueArg}" is not a valid issue number.`],
-        });
-        return;
-      }
+      const issueNum = parsedArgs.issueNumber;
 
       try {
-        const res = await orchestrator.enqueueTask(issueNum, { force });
+        const res = await orchestrator.enqueueTask(issueNum, { force, now, runner });
         if (res.requiresConfirmation && !force) {
           setCommandResult({
             type: 'info',

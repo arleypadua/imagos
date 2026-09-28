@@ -20,7 +20,8 @@ describe('IssueDAG', () => {
       {
         number: 2,
         title: 'Add User API Endpoint',
-        body: 'Depends on: #1',
+        body: '',
+        blockedBy: [{ number: 1 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/2',
@@ -55,7 +56,8 @@ describe('IssueDAG', () => {
       {
         number: 2,
         title: 'Add User API Endpoint',
-        body: 'Blocked by #1',
+        body: '',
+        blockedBy: [{ number: 1 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/2',
@@ -117,7 +119,8 @@ describe('IssueDAG', () => {
       {
         number: 50,
         title: '[Spec] User Billing Flow',
-        body: 'Subtasks:\n- [ ] #51\n- [ ] #52',
+        body: '',
+        subIssues: [{ number: 51 }, { number: 52 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/50',
@@ -127,7 +130,8 @@ describe('IssueDAG', () => {
       {
         number: 51,
         title: 'Stripe webhook handler',
-        body: 'Parent: #50',
+        body: '',
+        parent: { number: 50 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/51',
@@ -137,7 +141,8 @@ describe('IssueDAG', () => {
       {
         number: 52,
         title: 'Invoice PDF generator',
-        body: 'Parent: #50',
+        body: '',
+        parent: { number: 50 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/52',
@@ -183,7 +188,8 @@ describe('IssueDAG', () => {
       {
         number: 10,
         title: '[Spec] Auth Flow',
-        body: 'Subtasks:\n- [ ] #11\n- [ ] #12',
+        body: '',
+        subIssues: [{ number: 11 }, { number: 12 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/10',
@@ -193,7 +199,8 @@ describe('IssueDAG', () => {
       {
         number: 11,
         title: 'Auth Login',
-        body: 'Parent: #10',
+        body: '',
+        parent: { number: 10 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/11',
@@ -203,7 +210,8 @@ describe('IssueDAG', () => {
       {
         number: 12,
         title: 'Auth Logout',
-        body: 'Parent: #10',
+        body: '',
+        parent: { number: 10 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/12',
@@ -213,7 +221,8 @@ describe('IssueDAG', () => {
       {
         number: 20,
         title: '[Spec] Payment Flow',
-        body: 'Subtasks:\n- [ ] #21',
+        body: '',
+        subIssues: [{ number: 21 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/20',
@@ -223,7 +232,9 @@ describe('IssueDAG', () => {
       {
         number: 21,
         title: 'Credit Card Charge',
-        body: 'Parent: #20\nBlocked by: #11',
+        body: '',
+        parent: { number: 20 },
+        blockedBy: [{ number: 11 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/21',
@@ -260,7 +271,8 @@ describe('IssueDAG', () => {
       {
         number: 30,
         title: '[Spec] Spec A',
-        body: 'Subtasks:\n- [ ] #31',
+        body: '',
+        subIssues: [{ number: 31 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/30',
@@ -270,7 +282,8 @@ describe('IssueDAG', () => {
       {
         number: 31,
         title: 'Task A1',
-        body: 'Parent: #30',
+        body: '',
+        parent: { number: 30 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/31',
@@ -280,7 +293,8 @@ describe('IssueDAG', () => {
       {
         number: 40,
         title: '[Spec] Spec B',
-        body: 'Subtasks:\n- [ ] #41',
+        body: '',
+        subIssues: [{ number: 41 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/40',
@@ -290,7 +304,8 @@ describe('IssueDAG', () => {
       {
         number: 41,
         title: 'Task B1',
-        body: 'Parent: #40',
+        body: '',
+        parent: { number: 40 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/41',
@@ -312,7 +327,8 @@ describe('IssueDAG', () => {
       {
         number: 100,
         title: '[Spec] Feature 1',
-        body: 'Subtasks:\n- [ ] #101',
+        body: '',
+        subIssues: [{ number: 101 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/100',
@@ -322,7 +338,8 @@ describe('IssueDAG', () => {
       {
         number: 101,
         title: 'Task 1.1',
-        body: 'Parent: #100',
+        body: '',
+        parent: { number: 100 },
         state: 'CLOSED',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/101',
@@ -332,7 +349,8 @@ describe('IssueDAG', () => {
       {
         number: 200,
         title: '[Spec] Feature 2',
-        body: 'Subtasks:\n- [ ] #201',
+        body: '',
+        subIssues: [{ number: 201 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/200',
@@ -342,7 +360,8 @@ describe('IssueDAG', () => {
       {
         number: 201,
         title: 'Task 2.1',
-        body: 'Parent: #200',
+        body: '',
+        parent: { number: 200 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/201',
@@ -363,7 +382,8 @@ describe('IssueDAG', () => {
       {
         number: 100,
         title: '[Spec] Feature 1 (Done)',
-        body: 'Subtasks:\n- [ ] #101',
+        body: '',
+        subIssues: [{ number: 101 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/100',
@@ -373,7 +393,8 @@ describe('IssueDAG', () => {
       {
         number: 101,
         title: 'Task 1.1',
-        body: 'Parent: #100',
+        body: '',
+        parent: { number: 100 },
         state: 'CLOSED',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/101',
@@ -383,7 +404,8 @@ describe('IssueDAG', () => {
       {
         number: 200,
         title: '[Spec] Feature 2 (In progress)',
-        body: 'Subtasks:\n- [ ] #201',
+        body: '',
+        subIssues: [{ number: 201 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/200',
@@ -393,7 +415,8 @@ describe('IssueDAG', () => {
       {
         number: 201,
         title: 'Task 2.1',
-        body: 'Parent: #200',
+        body: '',
+        parent: { number: 200 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/201',
@@ -403,7 +426,8 @@ describe('IssueDAG', () => {
       {
         number: 300,
         title: '[Spec] Feature 3 (Closed issue)',
-        body: 'Subtasks:\n- [ ] #301',
+        body: '',
+        subIssues: [{ number: 301 }],
         state: 'CLOSED',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/300',
@@ -413,7 +437,8 @@ describe('IssueDAG', () => {
       {
         number: 301,
         title: 'Task 3.1',
-        body: 'Parent: #300',
+        body: '',
+        parent: { number: 300 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/301',
@@ -455,7 +480,9 @@ describe('IssueDAG', () => {
       {
         number: 10,
         title: '[Spec] Auth System',
-        body: 'Blocked by #5\nSubtasks:\n- [ ] #11\n- [ ] #12',
+        body: '',
+        blockedBy: [{ number: 5 }],
+        subIssues: [{ number: 11 }, { number: 12 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/10',
@@ -465,7 +492,8 @@ describe('IssueDAG', () => {
       {
         number: 11,
         title: 'Login endpoint',
-        body: 'Parent: #10',
+        body: '',
+        parent: { number: 10 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/11',
@@ -475,7 +503,8 @@ describe('IssueDAG', () => {
       {
         number: 12,
         title: 'Register endpoint',
-        body: 'Parent: #10',
+        body: '',
+        parent: { number: 10 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/12',
@@ -522,7 +551,9 @@ describe('IssueDAG', () => {
       {
         number: 10,
         title: '[Spec] Auth System',
-        body: 'Blocked by #5\nSubtasks:\n- [ ] #11\n- [ ] #12',
+        body: '',
+        blockedBy: [{ number: 5 }],
+        subIssues: [{ number: 11 }, { number: 12 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/10',
@@ -532,7 +563,8 @@ describe('IssueDAG', () => {
       {
         number: 11,
         title: 'Login endpoint',
-        body: 'Parent: #10',
+        body: '',
+        parent: { number: 10 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/11',
@@ -542,7 +574,8 @@ describe('IssueDAG', () => {
       {
         number: 12,
         title: 'Register endpoint',
-        body: 'Parent: #10',
+        body: '',
+        parent: { number: 10 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/12',
@@ -554,8 +587,10 @@ describe('IssueDAG', () => {
     const dag = new IssueDAG(DEFAULT_CONFIG);
     dag.build(issues);
 
+    expect(dag.getNode(10)?.status).toBe('ready');
+
     const readyNodes = dag.getReadyNodes();
-    expect(readyNodes.map((n) => n.issue.number).sort()).toEqual([10, 11, 12]);
+    expect(readyNodes.map((n) => n.issue.number).sort()).toEqual([11, 12]);
     expect(dag.getBlockedNodes()).toEqual([]);
   });
 
@@ -584,7 +619,9 @@ describe('IssueDAG', () => {
       {
         number: 10,
         title: '[Spec] Feature',
-        body: 'Blocked by #5\nSubtasks:\n- [ ] #11',
+        body: '',
+        blockedBy: [{ number: 5 }],
+        subIssues: [{ number: 11 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/10',
@@ -594,7 +631,9 @@ describe('IssueDAG', () => {
       {
         number: 11,
         title: 'Feature Task',
-        body: 'Parent: #10\nBlocked by #7',
+        body: '',
+        parent: { number: 10 },
+        blockedBy: [{ number: 7 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/11',
@@ -649,7 +688,9 @@ describe('IssueDAG', () => {
       {
         number: 10,
         title: '[Spec] Root Epic',
-        body: 'Blocked by #1\nSubtasks:\n- [ ] #20',
+        body: '',
+        blockedBy: [{ number: 1 }],
+        subIssues: [{ number: 20 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/10',
@@ -659,7 +700,10 @@ describe('IssueDAG', () => {
       {
         number: 20,
         title: '[Spec] Sub Spec',
-        body: 'Parent: #10\nBlocked by #2\nSubtasks:\n- [ ] #30',
+        body: '',
+        parent: { number: 10 },
+        blockedBy: [{ number: 2 }],
+        subIssues: [{ number: 30 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/20',
@@ -669,7 +713,8 @@ describe('IssueDAG', () => {
       {
         number: 30,
         title: 'Leaf Task',
-        body: 'Parent: #20',
+        body: '',
+        parent: { number: 20 },
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/30',
@@ -737,8 +782,124 @@ describe('IssueDAG', () => {
     expect(childNode?.status).toBe('blocked');
     expect(childNode?.blockers).toContain(186);
 
-    expect(dag.getReadyNodes().map((n) => n.issue.number)).toEqual([186]);
+    expect(dag.getNode(186)?.status).toBe('ready');
+    expect(dag.getReadyNodes()).toEqual([]);
     expect(dag.getBlockedNodes().map((n) => n.issue.number).sort()).toEqual([187, 195]);
+  });
+
+  it('should never offer a spec as a ready node, however it is titled or shaped', () => {
+    const issues: GitHubIssue[] = [
+      {
+        number: 300,
+        title: 'Spec: Scheduled functions',
+        body: 'Acceptance criteria',
+        subIssues: [{ number: 301 }],
+        state: 'OPEN',
+        labels: [{ name: 'ready-for-agent' }],
+        url: 'https://github.com/owner/repo/issues/300',
+        createdAt: '2026-08-19T10:00:00Z',
+        updatedAt: '2026-08-19T10:00:00Z',
+      },
+      {
+        number: 301,
+        title: 'A Schedule fires and the Function runs',
+        body: '',
+        parent: { number: 300 },
+        state: 'OPEN',
+        labels: [{ name: 'ready-for-agent' }],
+        url: 'https://github.com/owner/repo/issues/301',
+        createdAt: '2026-08-19T10:00:00Z',
+        updatedAt: '2026-08-19T10:00:00Z',
+      },
+      {
+        number: 400,
+        title: '[Spec] Hostname routing',
+        body: 'Requirements',
+        subIssues: [{ number: 401 }],
+        state: 'OPEN',
+        labels: [{ name: 'ready-for-agent' }],
+        url: 'https://github.com/owner/repo/issues/400',
+        createdAt: '2026-08-19T10:00:00Z',
+        updatedAt: '2026-08-19T10:00:00Z',
+      },
+      {
+        number: 401,
+        title: 'Resolve a tenant from the Host header',
+        body: '',
+        parent: { number: 400 },
+        state: 'OPEN',
+        labels: [{ name: 'ready-for-agent' }],
+        url: 'https://github.com/owner/repo/issues/401',
+        createdAt: '2026-08-19T10:00:00Z',
+        updatedAt: '2026-08-19T10:00:00Z',
+      },
+    ];
+
+    const dag = new IssueDAG(DEFAULT_CONFIG);
+    dag.build(issues);
+
+    expect(dag.getNode(300)?.kind).toBe('spec');
+    expect(dag.getNode(400)?.kind).toBe('spec');
+    expect(dag.getNode(300)?.status).toBe('ready');
+
+    // Umbrella tickets stay out of dispatch even while they are otherwise ready
+    expect(dag.getReadyNodes().map((n) => n.issue.number).sort()).toEqual([301, 401]);
+  });
+
+  it('should hand back ready nodes in dispatch order, not in the order GitHub returned them', () => {
+    const issue = (number: number, blockedBy: number[], createdAt: string): GitHubIssue => ({
+      number,
+      title: `Issue ${number}`,
+      body: '',
+      blockedBy: blockedBy.map((n) => ({ number: n })),
+      state: 'OPEN',
+      labels: [{ name: 'ready-for-agent' }],
+      url: `https://github.com/owner/repo/issues/${number}`,
+      createdAt,
+      updatedAt: createdAt,
+    });
+
+    // Newest first, the order the GraphQL query returns
+    const issues: GitHubIssue[] = [
+      issue(303, [302], '2026-08-20T10:00:00Z'),
+      issue(302, [], '2026-08-19T10:00:00Z'),
+      issue(148, [], '2026-08-11T11:14:24Z'),
+      issue(35, [], '2026-07-31T14:32:21Z'),
+    ];
+
+    const dag = new IssueDAG(DEFAULT_CONFIG);
+    dag.build(issues);
+
+    // #302 is the newest ready issue but goes first because it unblocks #303;
+    // the rest tie on every earlier tier and fall through to oldest-first
+    expect(dag.getReadyNodes().map((n) => n.issue.number)).toEqual([302, 35, 148]);
+  });
+
+  it('should hand back every open node in priority order, including blocked ones and specs', () => {
+    const issue = (number: number, blockedBy: number[], createdAt: string, state = 'OPEN'): GitHubIssue => ({
+      number,
+      title: `Issue ${number}`,
+      body: '',
+      blockedBy: blockedBy.map((n) => ({ number: n })),
+      state: state as GitHubIssue['state'],
+      labels: [{ name: 'ready-for-agent' }],
+      url: `https://github.com/owner/repo/issues/${number}`,
+      createdAt,
+      updatedAt: createdAt,
+    });
+
+    const issues: GitHubIssue[] = [
+      issue(303, [302], '2026-08-20T10:00:00Z'),
+      issue(302, [], '2026-08-19T10:00:00Z'),
+      issue(148, [], '2026-08-11T11:14:24Z'),
+      issue(35, [], '2026-07-31T14:32:21Z', 'CLOSED'),
+    ];
+
+    const dag = new IssueDAG(DEFAULT_CONFIG);
+    dag.build(issues);
+
+    // #302 leads on unblocking power; #303 is blocked but still listed; the closed #35 is dropped
+    expect(dag.getOpenNodesByPriority().map((n) => n.issue.number)).toEqual([302, 148, 303]);
   });
 
   it('should respect allowedProviders when assigning node.runnerName from issue labels', () => {
@@ -809,7 +970,8 @@ describe('IssueDAG', () => {
       {
         number: 50,
         title: '[Spec] Spec 50',
-        body: 'Subtasks:\n- [ ] #51',
+        body: '',
+        subIssues: [{ number: 51 }],
         state: 'OPEN',
         labels: [{ name: 'ready-for-agent' }],
         url: 'https://github.com/owner/repo/issues/50',
@@ -819,7 +981,8 @@ describe('IssueDAG', () => {
       {
         number: 51,
         title: 'Spec Child Untriaged',
-        body: 'Parent: #50',
+        body: '',
+        parent: { number: 50 },
         state: 'OPEN',
         labels: [{ name: 'needs-triage' }],
         url: 'https://github.com/owner/repo/issues/51',
@@ -835,6 +998,71 @@ describe('IssueDAG', () => {
     const scopedDag = new IssueDAG({ ...DEFAULT_CONFIG, targetSpec: 50 });
     scopedDag.build(issues);
     expect(scopedDag.getTriageNodes().map((n) => n.issue.number)).toEqual([51]);
+  });
+
+  it('should never offer epics or nested specs as ready nodes and resolve child tickets recursively', () => {
+    const issues: GitHubIssue[] = [
+      {
+        number: 376,
+        title: 'Epic: Liability shield and operator controls',
+        body: 'Top-level epic for operator restriction and liability compliance',
+        state: 'OPEN',
+        labels: [{ name: 'ready-for-agent' }],
+        url: 'https://github.com/wawesomeio/wawesome-monorepo/issues/376',
+        createdAt: '2026-08-24T10:00:00Z',
+        updatedAt: '2026-08-24T10:00:00Z',
+        subIssues: [{ number: 380, title: 'Spec: operator restriction', state: 'OPEN' }],
+      },
+      {
+        number: 380,
+        title: 'Spec: operator restriction — make a Function, App or Tenant unreachable, recorded',
+        body: 'Spec for #376. Decisions were settled in a grilling session.',
+        state: 'OPEN',
+        labels: [{ name: 'ready-for-agent' }],
+        url: 'https://github.com/wawesomeio/wawesome-monorepo/issues/380',
+        createdAt: '2026-08-24T10:00:00Z',
+        updatedAt: '2026-08-24T10:00:00Z',
+        parent: { number: 376, title: 'Epic: Liability shield' },
+        subIssues: [{ number: 381, title: 'Restrict and lift an App, recorded', state: 'OPEN' }],
+      },
+      {
+        number: 381,
+        title: 'Restrict and lift an App, recorded',
+        body: '',
+        parent: { number: 380 },
+        state: 'OPEN',
+        labels: [{ name: 'ready-for-agent' }],
+        url: 'https://github.com/wawesomeio/wawesome-monorepo/issues/381',
+        createdAt: '2026-08-24T10:00:00Z',
+        updatedAt: '2026-08-24T10:00:00Z',
+        parent: { number: 380, title: 'Spec: operator restriction' },
+      },
+    ];
+
+    const dag = new IssueDAG(DEFAULT_CONFIG);
+    dag.build(issues);
+
+    // Verify kinds
+    expect(dag.getNode(376)?.kind).toBe('spec');
+    expect(dag.getNode(380)?.kind).toBe('spec');
+    expect(dag.getNode(381)?.kind).toBe('ticket');
+
+    // Only ticket #381 should be ready
+    expect(dag.getReadyNodes().map((n) => n.issue.number)).toEqual([381]);
+
+    // Recursive child resolution
+    expect(dag.getSpecChildIssueNumbers(376).sort()).toEqual([380, 381]);
+    expect(dag.getSpecChildIssueNumbers(380)).toEqual([381]);
+
+    // Scoping to Epic 376 should only return leaf ticket 381
+    const epicScopedDag = new IssueDAG({ ...DEFAULT_CONFIG, targetSpec: 376 });
+    epicScopedDag.build(issues);
+    expect(epicScopedDag.getReadyNodes().map((n) => n.issue.number)).toEqual([381]);
+
+    // Scoping to Spec 380 should only return leaf ticket 381
+    const specScopedDag = new IssueDAG({ ...DEFAULT_CONFIG, targetSpec: 380 });
+    specScopedDag.build(issues);
+    expect(specScopedDag.getReadyNodes().map((n) => n.issue.number)).toEqual([381]);
   });
 });
 

@@ -149,7 +149,7 @@ describe('Remote Control Enqueue Command & Callbacks', () => {
   it('handles /enqueue <issueNumber> command when unblocked', async () => {
     await provider.triggerCommand('enqueue', ['42']);
 
-    expect(mockController.enqueueTask).toHaveBeenCalledWith(42, { force: false });
+    expect(mockController.enqueueTask).toHaveBeenCalledWith(42, expect.objectContaining({ force: false }));
     expect(provider.sentMessages.length).toBe(1);
     expect(provider.sentMessages[0].text).toContain('Priority Enqueued');
     expect(provider.sentMessages[0].text).toContain('#42');
@@ -158,7 +158,7 @@ describe('Remote Control Enqueue Command & Callbacks', () => {
   it('handles /run alias identically to /enqueue', async () => {
     await provider.triggerCommand('run', ['55']);
 
-    expect(mockController.enqueueTask).toHaveBeenCalledWith(55, { force: false });
+    expect(mockController.enqueueTask).toHaveBeenCalledWith(55, expect.objectContaining({ force: false }));
     expect(provider.sentMessages.length).toBe(1);
     expect(provider.sentMessages[0].text).toContain('Priority Enqueued');
     expect(provider.sentMessages[0].text).toContain('#55');
@@ -167,7 +167,7 @@ describe('Remote Control Enqueue Command & Callbacks', () => {
   it('prompts with inline buttons when blocked issue requires confirmation', async () => {
     await provider.triggerCommand('enqueue', ['88']);
 
-    expect(mockController.enqueueTask).toHaveBeenCalledWith(88, { force: false });
+    expect(mockController.enqueueTask).toHaveBeenCalledWith(88, expect.objectContaining({ force: false }));
     expect(provider.sentMessages.length).toBe(1);
     expect(provider.sentMessages[0].text).toContain('Confirmation Required');
     expect(provider.sentMessages[0].options?.actions).toBeDefined();
@@ -182,7 +182,7 @@ describe('Remote Control Enqueue Command & Callbacks', () => {
   it('bypasses confirmation when --force is passed to /enqueue', async () => {
     await provider.triggerCommand('enqueue', ['88', '--force']);
 
-    expect(mockController.enqueueTask).toHaveBeenCalledWith(88, { force: true });
+    expect(mockController.enqueueTask).toHaveBeenCalledWith(88, expect.objectContaining({ force: true }));
     expect(provider.sentMessages.length).toBe(1);
     expect(provider.sentMessages[0].text).toContain('Priority Enqueued');
     expect(provider.sentMessages[0].options?.actions).toBeUndefined();
@@ -192,7 +192,7 @@ describe('Remote Control Enqueue Command & Callbacks', () => {
     const context: ActionContext = { messageId: 101, chatId: 9999 };
     await provider.triggerAction('v1:enq:88:f', 123456, context);
 
-    expect(mockController.enqueueTask).toHaveBeenCalledWith(88, { force: true });
+    expect(mockController.enqueueTask).toHaveBeenCalledWith(88, expect.objectContaining({ force: true }));
     expect(provider.editedMessages.length).toBe(1);
     expect(provider.editedMessages[0].messageId).toBe(101);
     expect(provider.editedMessages[0].text).toContain('Priority Enqueued');
@@ -202,7 +202,7 @@ describe('Remote Control Enqueue Command & Callbacks', () => {
     const context: ActionContext = { messageId: 102, chatId: 9999 };
     await provider.triggerAction('v1:enq:88:c', 123456, context);
 
-    expect(mockController.enqueueTask).not.toHaveBeenCalledWith(88, { force: true });
+    expect(mockController.enqueueTask).not.toHaveBeenCalledWith(88, expect.objectContaining({ force: true }));
     expect(provider.editedMessages.length).toBe(1);
     expect(provider.editedMessages[0].messageId).toBe(102);
     expect(provider.editedMessages[0].text).toContain('cancelled by developer');

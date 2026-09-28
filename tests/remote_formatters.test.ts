@@ -24,11 +24,7 @@ import {
   parseTaskActionPayload,
   parseSpecActionPayload,
   formatBrowse,
-  formatBrowseSpecDetail,
-  buildBrowseRootCallbackData,
-  buildBrowseSpecCallbackData,
-  buildBrowseToggleCallbackData,
-  buildBrowseEnqueueAllCallbackData,
+  buildBrowsePageCallbackData,
   parseBrowseActionPayload,
 } from '../src/remote/formatters.js';
 
@@ -501,155 +497,67 @@ describe('Remote Message Formatters', () => {
     });
   });
 
-  describe('formatBrowse & formatBrowseSpecDetail & parseBrowseActionPayload', () => {
-    it('parses and builds browse action callback payloads', () => {
-      expect(buildBrowseRootCallbackData(true)).toBe('v1:b:r:1');
-      expect(buildBrowseRootCallbackData(false)).toBe('v1:b:r:0');
-      expect(buildBrowseSpecCallbackData(22, true)).toBe('v1:b:s:22:1');
-      expect(buildBrowseSpecCallbackData(22, false)).toBe('v1:b:s:22:0');
-      expect(buildBrowseToggleCallbackData(true)).toBe('v1:b:t:1');
-      expect(buildBrowseToggleCallbackData(false)).toBe('v1:b:t:0');
-      expect(buildBrowseEnqueueAllCallbackData(22)).toBe('v1:b:ea:22');
+  describe('formatBrowse & parseBrowseActionPayload', () => {
+    const issues = (count: number) =>
+      Array.from({ length: count }, (_, i) => ({ number: i + 1, title: `Issue ${i + 1}` }));
 
-      expect(parseBrowseActionPayload('v1:b:r:1')).toEqual({ type: 'root', showOnlyOpen: true });
-      expect(parseBrowseActionPayload('v1:b:r:0')).toEqual({ type: 'root', showOnlyOpen: false });
-      expect(parseBrowseActionPayload('v1:b:s:22:1')).toEqual({ type: 'spec', specNumber: 22, showOnlyOpen: true });
-      expect(parseBrowseActionPayload('v1:b:s:22:0')).toEqual({ type: 'spec', specNumber: 22, showOnlyOpen: false });
-      expect(parseBrowseActionPayload('v1:b:t:0')).toEqual({ type: 'toggle', showOnlyOpen: false });
-      expect(parseBrowseActionPayload('v1:b:t:1')).toEqual({ type: 'toggle', showOnlyOpen: true });
-      expect(parseBrowseActionPayload('v1:b:ea:22')).toEqual({ type: 'enqueueAll', specNumber: 22 });
-      expect(parseBrowseActionPayload('v1:b:invalid')).toBeNull();
+    it('parses and builds browse page callback payloads', () => {
+      expect(buildBrowsePageCallbackData(1)).toBe('v1:b:p:1');
+      expect(buildBrowsePageCallbackData(7)).toBe('v1:b:p:7');
+
+      expect(parseBrowseActionPayload('v1:b:p:1')).toEqual({ type: 'page', page: 1 });
+      expect(parseBrowseActionPayload('v1:b:p:7')).toEqual({ type: 'page', page: 7 });
+      expect(parseBrowseActionPayload('v1:b:p:0')).toBeNull();
+      expect(parseBrowseActionPayload('v1:b:p:x')).toBeNull();
+      expect(parseBrowseActionPayload('v1:b:r:1')).toBeNull();
       expect(parseBrowseActionPayload('other')).toBeNull();
     });
 
-    it('formats empty tree message when no specs or standalone issues exist', () => {
-      const { text, actions } = formatBrowse('owner/repo', {
-        specs: [],
-        standaloneIssues: [],
-        totalOpenSpecs: 0,
-        totalOpenIssues: 0,
-        readyIssueNumbers: [],
-      });
+    it('formats an empty message when there are no open issues', () => {
+      const { text, actions } = formatBrowse('owner/repo', issues(0));
       expect(text).toContain('[owner/repo]');
-      expect(text).toContain('No open issues or specifications found in repository.');
+      expect(text).toContain('No open issues found.');
       expect(actions).toHaveLength(1);
       expect(actions[0][0].label).toContain('Open GitHub Backlog');
     });
 
-    it('formats root overview with spec buttons, filter toggle, standalone enqueue, and GitHub backlog button', () => {
-      const { text, actions } = formatBrowse(
-        'owner/repo',
-        {
-          specs: [
-            {
-              number: 10,
-              title: 'User Auth Spec',
-              isComplete: false,
-              totalTickets: 2,
-              completedTickets: 1,
-              status: 'pending',
-              children: [
-                {
-                  number: 11,
-                  title: 'JWT Auth',
-                  status: 'ready',
-                  state: 'OPEN',
-                  isClosed: false,
-                },
-                {
-                  number: 12,
-                  title: 'Login Controller',
-                  status: 'completed',
-                  state: 'CLOSED',
-                  isClosed: true,
-                },
-              ],
-            },
-          ],
-          standaloneIssues: [
-            {
-              number: 20,
-              title: 'Fix DB reconnection',
-              status: 'ready',
-              state: 'OPEN',
-            },
-          ],
-          totalOpenSpecs: 1,
-          totalOpenIssues: 2,
-          readyIssueNumbers: [11, 20],
-        },
-        { showOnlyOpen: false }
-      );
+    it('lists number, title and link for the first page and offers next only', () => {
+      const { text, actions } = formatBrowse('owner/repo', issues(25));
 
-      expect(text).toContain('🌳 *Issue Tree Browser*');
-      expect(text).toContain('📁 *Specifications* (1):');
-      expect(text).toContain('*#10* - *User Auth Spec* _(1/2 complete)_');
-      expect(text).toContain('📄 *Standalone Issues* (1):');
-      expect(text).toContain('• 🟢 *#20* - Fix DB reconnection');
+      expect(text).toContain('📋 *Issues by priority* (25) — page 1/3');
+      expect(text).toContain('[#1](https://github.com/owner/repo/issues/1) Issue 1');
+      expect(text).toContain('[#10](https://github.com/owner/repo/issues/10) Issue 10');
+      expect(text).not.toContain('Issue 11');
 
-      // Actions: Spec drill-down row, Filter toggle row, Standalone enqueue row, GitHub backlog row
-      expect(actions.some((row) => row.some((b) => b.label.includes('#10') && b.payload === 'v1:b:s:10:0'))).toBe(true);
-      expect(actions.some((row) => row.some((b) => b.label.includes('Filter: Open Only') && b.payload === 'v1:b:t:0'))).toBe(true);
-      expect(actions.some((row) => row.some((b) => b.label.includes('#20') && b.payload.startsWith('v1:enq:20')))).toBe(true);
-      expect(actions.some((row) => row.some((b) => b.label.includes('GitHub Backlog')))).toBe(true);
+      const nav = actions[0];
+      expect(nav).toHaveLength(1);
+      expect(nav[0].label).toContain('Next');
+      expect(nav[0].payload).toBe('v1:b:p:2');
     });
 
-    it('formats spec detail view with child task list, enqueue buttons, and back button', () => {
-      const spec = {
-        number: 10,
-        title: 'User Auth Spec',
-        isComplete: false,
-        totalTickets: 3,
-        completedTickets: 1,
-        status: 'pending' as const,
-        blockers: [5],
-        worker: {
-          issueNumber: 10,
-          title: 'User Auth Spec',
-          branchName: 'agent/issue-10',
-          status: 'running' as const,
-        },
-        children: [
-          {
-            number: 11,
-            title: 'JWT Auth',
-            status: 'ready' as const,
-            state: 'OPEN',
-            isClosed: false,
-          },
-          {
-            number: 12,
-            title: 'OAuth Controller',
-            status: 'ready' as const,
-            state: 'OPEN',
-            isClosed: false,
-          },
-          {
-            number: 13,
-            title: 'Login Controller',
-            status: 'completed' as const,
-            state: 'CLOSED',
-            isClosed: true,
-          },
-        ],
-      };
+    it('offers both directions on a middle page and clamps out-of-range pages', () => {
+      const { text, actions } = formatBrowse('owner/repo', issues(25), { page: 2 });
+      expect(text).toContain('page 2/3');
+      expect(text).toContain('[#11](https://github.com/owner/repo/issues/11) Issue 11');
+      expect(actions[0].map((b) => b.payload)).toEqual(['v1:b:p:1', 'v1:b:p:3']);
 
-      const { text, actions } = formatBrowseSpecDetail('owner/repo', spec, { showOnlyOpen: false });
-
-      expect(text).toContain('⚡ *Spec #10: User Auth Spec*');
-      expect(text).toContain('Progress: 1 of 3 child tickets complete');
-      expect(text).toContain('• *Blockers*: #5');
-      expect(text).toContain('• *Active Worktree*: `agent/issue-10` (running)');
-      expect(text).toContain('├── 🟢 *#11* - JWT Auth');
-      expect(text).toContain('├── 🟢 *#12* - OAuth Controller');
-      expect(text).toContain('└── ✔️ *#13* - Login Controller _(closed)_');
-
-      // Check actions: individual enqueue buttons, bulk enqueue button, back button, GitHub link
-      expect(actions.some((row) => row.some((b) => b.label.includes('#11')))).toBe(true);
-      expect(actions.some((row) => row.some((b) => b.label.includes('#12')))).toBe(true);
-      expect(actions.some((row) => row.some((b) => b.label.includes('Enqueue All 2 Open Tasks') && b.payload === 'v1:b:ea:10'))).toBe(true);
-      expect(actions.some((row) => row.some((b) => b.label.includes('Back to Tree') && b.payload === 'v1:b:r:0'))).toBe(true);
-      expect(actions.some((row) => row.some((b) => b.label.includes('View on GitHub') && b.url?.includes('/issues/10')))).toBe(true);
+      expect(formatBrowse('owner/repo', issues(25), { page: 99 }).text).toContain('page 3/3');
+      expect(formatBrowse('owner/repo', issues(25), { page: -4 }).text).toContain('page 1/3');
     });
+
+    it('renders the list in the order given, not re-sorted by issue number', () => {
+      const { text } = formatBrowse('owner/repo', [
+        { number: 30, title: 'bug: fix edge case' },
+        { number: 4, title: 'Epic: Remote Control' },
+        { number: 11, title: 'JWT Auth' },
+      ]);
+
+      expect(text.split('\n').filter((l) => l.startsWith('[#'))).toEqual([
+        '[#30](https://github.com/owner/repo/issues/30) bug: fix edge case',
+        '[#4](https://github.com/owner/repo/issues/4) Epic: Remote Control',
+        '[#11](https://github.com/owner/repo/issues/11) JWT Auth',
+      ]);
+    });
+
   });
 });

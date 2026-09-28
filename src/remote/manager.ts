@@ -1,6 +1,7 @@
 import type {
   RemoteControlProvider,
   RemoteActionController,
+  BrowseIssueSummary,
   RemoteControlManagerOptions,
   RemoteMessageOptions,
   InteractiveAction,
@@ -58,9 +59,9 @@ import {
   formatPauseUsage,
   formatResumeUsage,
   formatBrowse,
-  formatBrowseSpecDetail,
   parseBrowseActionPayload,
 } from './formatters.js';
+import { parseEnqueueArgs, ENQUEUE_USAGE } from '../pipeline/enqueue_help.js';
 import type { QuotaMonitor } from '../quota/monitor.js';
 
 export interface SendQuotaPausedOptions extends RemoteMessageOptions {
@@ -189,7 +190,6 @@ export class RemoteControlManager {
       await this.handleEnqueueAction(payload, userId, context);
     });
 
-    // Register browse tree action handler with provider (spec drill-down, toggle, enqueue all)
     this.provider.onAction('v1:b', async (_action, payload, userId, context) => {
       await this.handleBrowseAction(payload, userId, context);
     });
@@ -730,13 +730,19 @@ export class RemoteControlManager {
     });
   }
 
+  private getBrowseIssues(): BrowseIssueSummary[] {
+    return this.actionController?.getBrowseIssues ? this.actionController.getBrowseIssues() : [];
+  }
+
   public async handleBrowseCommand(
-    _args: string[],
+    args: string[],
     _userId: number,
     context?: ActionContext
   ): Promise<void> {
-    const treeData = this.actionController?.getIssueTreeSummary ? this.actionController.getIssueTreeSummary() : undefined;
-    const { text, actions } = formatBrowse(this.repository, treeData);
+    const page = parseInt(args[0], 10);
+    const { text, actions } = formatBrowse(this.repository, this.getBrowseIssues(), {
+      page: isNaN(page) ? 1 : page,
+    });
     await this.provider.sendMessage(text, {
       chatId: context?.chatId ?? this.defaultChatId,
       parseMode: 'Markdown',
@@ -750,8 +756,19 @@ export class RemoteControlManager {
     context?: ActionContext
   ): Promise<void> {
     if (args.length === 0) {
+      const summary = this.actionController?.getTasksSummary ? this.actionController.getTasksSummary() : undefined;
+      await this.provider.sendMessage(formatEnqueueUsage(this.repository, { queued: summary?.queued }), {
+        chatId: context?.chatId ?? this.defaultChatId,
+        parseMode: 'Markdown',
+      });
+      return;
+    }
+
+    const { issueNumber: parsedIssueNumber, force, now, runner, unknownFlags } = parseEnqueueArgs(args);
+
+    if (unknownFlags.length > 0) {
       await this.provider.sendMessage(
-        '💡 *Usage*: `/enqueue <issueNumber> [--force]` (e.g. `/enqueue 42` or `/run 42 --force`)',
+        `⚠️ Unknown option(s): ${unknownFlags.map((f) => `\`${f}\``).join(', ')}.\n\n*Usage*: \`${ENQUEUE_USAGE}\``,
         {
           chatId: context?.chatId ?? this.defaultChatId,
           parseMode: 'Markdown',
@@ -760,10 +777,7 @@ export class RemoteControlManager {
       return;
     }
 
-    const force = args.some((a) => a === '--force' || a === '-f');
-    const issueArg = args.find((a) => a !== '--force' && a !== '-f');
-
-    if (!issueArg) {
+    if (parsedIssueNumber === undefined) {
       const summary = this.actionController?.getTasksSummary ? this.actionController.getTasksSummary() : undefined;
       const text = formatEnqueueUsage(this.repository, { queued: summary?.queued });
       await this.provider.sendMessage(text, {
@@ -773,17 +787,7 @@ export class RemoteControlManager {
       return;
     }
 
-    const issueNumber = parseInt(issueArg.replace(/^#/, ''), 10);
-    if (isNaN(issueNumber)) {
-      await this.provider.sendMessage(
-        `⚠️ Invalid issue number: \`${issueArg}\`. Expected a number like \`42\` or \`#42\`.`,
-        {
-          chatId: context?.chatId ?? this.defaultChatId,
-          parseMode: 'Markdown',
-        }
-      );
-      return;
-    }
+    const issueNumber = parsedIssueNumber;
 
     if (!this.actionController?.enqueueTask) {
       await this.provider.sendMessage(
@@ -796,7 +800,7 @@ export class RemoteControlManager {
       return;
     }
 
-    const result = await this.actionController.enqueueTask(issueNumber, { force });
+    const result = await this.actionController.enqueueTask(issueNumber, { force, now, runner });
 
     if (result.requiresConfirmation && !force) {
       const { text, actions } = formatEnqueueConfirmation(this.repository, {
@@ -1345,103 +1349,27 @@ export class RemoteControlManager {
     const parsed = parseBrowseActionPayload(payload);
     if (!parsed) return false;
 
-    const treeData = this.actionController?.getIssueTreeSummary ? this.actionController.getIssueTreeSummary() : undefined;
+    const { text, actions } = formatBrowse(this.repository, this.getBrowseIssues(), { page: parsed.page });
 
-    if (parsed.type === 'root') {
-      const { text, actions } = formatBrowse(this.repository, treeData, { showOnlyOpen: parsed.showOnlyOpen });
-      if (context?.messageId) {
-        try {
-          await this.provider.editMessage(context.messageId, text, {
-            chatId: context.chatId ?? this.defaultChatId,
-            parseMode: 'Markdown',
-            actions: actions.length > 0 ? actions : [],
-          });
-        } catch (err: any) {
-          ActivityLogger.error('RemoteControlManager: failed to edit browse root message inline:', err);
-        }
-      } else {
-        await this.provider.sendMessage(text, {
-          chatId: context?.chatId ?? this.defaultChatId,
+    if (context?.messageId) {
+      try {
+        await this.provider.editMessage(context.messageId, text, {
+          chatId: context.chatId ?? this.defaultChatId,
           parseMode: 'Markdown',
-          actions: actions.length > 0 ? actions : undefined,
+          actions: actions.length > 0 ? actions : [],
         });
+      } catch (err: any) {
+        ActivityLogger.error('RemoteControlManager: failed to edit browse page message inline:', err);
       }
-      return true;
+    } else {
+      await this.provider.sendMessage(text, {
+        chatId: context?.chatId ?? this.defaultChatId,
+        parseMode: 'Markdown',
+        actions: actions.length > 0 ? actions : undefined,
+      });
     }
 
-    if (parsed.type === 'toggle') {
-      const nextShowOnlyOpen = !parsed.showOnlyOpen;
-      const { text, actions } = formatBrowse(this.repository, treeData, { showOnlyOpen: nextShowOnlyOpen });
-      if (context?.messageId) {
-        try {
-          await this.provider.editMessage(context.messageId, text, {
-            chatId: context.chatId ?? this.defaultChatId,
-            parseMode: 'Markdown',
-            actions: actions.length > 0 ? actions : [],
-          });
-        } catch (err: any) {
-          ActivityLogger.error('RemoteControlManager: failed to edit browse toggle message inline:', err);
-        }
-      } else {
-        await this.provider.sendMessage(text, {
-          chatId: context?.chatId ?? this.defaultChatId,
-          parseMode: 'Markdown',
-          actions: actions.length > 0 ? actions : undefined,
-        });
-      }
-      return true;
-    }
-
-    if (parsed.type === 'spec') {
-      const spec = treeData?.specs.find((s) => s.number === parsed.specNumber);
-      if (spec) {
-        const { text, actions } = formatBrowseSpecDetail(this.repository, spec, { showOnlyOpen: parsed.showOnlyOpen });
-        if (context?.messageId) {
-          try {
-            await this.provider.editMessage(context.messageId, text, {
-              chatId: context.chatId ?? this.defaultChatId,
-              parseMode: 'Markdown',
-              actions: actions.length > 0 ? actions : [],
-            });
-          } catch (err: any) {
-            ActivityLogger.error('RemoteControlManager: failed to edit browse spec message inline:', err);
-          }
-        } else {
-          await this.provider.sendMessage(text, {
-            chatId: context?.chatId ?? this.defaultChatId,
-            parseMode: 'Markdown',
-            actions: actions.length > 0 ? actions : undefined,
-          });
-        }
-        return true;
-      }
-    }
-
-    if (parsed.type === 'enqueueAll') {
-      if (this.actionController?.enqueueTask) {
-        await this.actionController.enqueueTask(parsed.specNumber, { force: true });
-      }
-      const updatedTreeData = this.actionController?.getIssueTreeSummary ? this.actionController.getIssueTreeSummary() : undefined;
-      const spec = updatedTreeData?.specs.find((s) => s.number === parsed.specNumber);
-      if (spec) {
-        const { text, actions } = formatBrowseSpecDetail(this.repository, spec, { showOnlyOpen: false });
-        const banner = `⚡ *Enqueued open child tasks for Spec #${parsed.specNumber}*\n\n`;
-        if (context?.messageId) {
-          try {
-            await this.provider.editMessage(context.messageId, banner + text, {
-              chatId: context.chatId ?? this.defaultChatId,
-              parseMode: 'Markdown',
-              actions: actions.length > 0 ? actions : [],
-            });
-          } catch (err: any) {
-            ActivityLogger.error('RemoteControlManager: failed to edit browse enqueue-all message inline:', err);
-          }
-        }
-        return true;
-      }
-    }
-
-    return false;
+    return true;
   }
 
   private handleAgentEvent(_event: AgentEvent): void {

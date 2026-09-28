@@ -88,6 +88,56 @@ describe('GitHubClient', () => {
       );
     });
 
+    it('should page through every issue instead of stopping at the first page', async () => {
+      const pageOf = (numbers: number[], hasNextPage: boolean, endCursor: string | null) => ({
+        data: {
+          repository: {
+            issues: {
+              pageInfo: { hasNextPage, endCursor },
+              nodes: numbers.map((number) => ({
+                number,
+                title: `Issue ${number}`,
+                body: '',
+                state: 'OPEN',
+                url: `https://github.com/owner/repo/issues/${number}`,
+                createdAt: '2026-08-01T00:00:00Z',
+                updatedAt: '2026-08-01T00:00:00Z',
+                labels: { nodes: [] },
+                parent: null,
+                blockedBy: { nodes: [] },
+                blocking: { nodes: [] },
+                subIssues: { nodes: [] },
+                comments: { nodes: [] },
+              })),
+            },
+          },
+        },
+      });
+
+      mockedExeca.mockResolvedValueOnce({ stdout: JSON.stringify(pageOf([303, 302], true, 'CURSOR_1')) } as any);
+      mockedExeca.mockResolvedValueOnce({ stdout: JSON.stringify(pageOf([47, 35], false, null)) } as any);
+
+      const client = new GitHubClient({ repository: 'owner/repo' });
+      const issues = await client.fetchIssues();
+
+      expect(issues.map((i) => i.number)).toEqual([303, 302, 47, 35]);
+      expect(mockedExeca).toHaveBeenCalledTimes(2);
+      expect(mockedExeca.mock.calls[0][1]).not.toContain('after=CURSOR_1');
+      expect(mockedExeca.mock.calls[1][1]).toContain('after=CURSOR_1');
+    });
+
+    it('should stop after a single page when the response carries no pageInfo', async () => {
+      const mockGraphQLResponse = {
+        data: { repository: { issues: { nodes: [] } } },
+      };
+      mockedExeca.mockResolvedValueOnce({ stdout: JSON.stringify(mockGraphQLResponse) } as any);
+
+      const client = new GitHubClient({ repository: 'owner/repo' });
+      await client.fetchIssues();
+
+      expect(mockedExeca).toHaveBeenCalledTimes(1);
+    });
+
     it('should fallback to gh issue list when GraphQL fails', async () => {
       const mockCliIssues = [
         { number: 1, title: 'Issue 1', body: 'Body 1', state: 'OPEN', labels: [], url: 'https://...', createdAt: '', updatedAt: '' },
@@ -107,6 +157,80 @@ describe('GitHubClient', () => {
         expect.arrayContaining(['issue', 'list', '--repo', 'owner/repo']),
         expect.any(Object)
       );
+    });
+
+    describe('incremental sync', () => {
+      const node = (number: number, title = `Issue ${number}`) => ({
+        number,
+        title,
+        body: '',
+        state: 'OPEN',
+        url: `https://github.com/owner/repo/issues/${number}`,
+        createdAt: '2026-08-01T00:00:00Z',
+        updatedAt: '2026-08-01T00:00:00Z',
+        labels: { nodes: [] },
+        parent: null,
+        blockedBy: { nodes: [] },
+        blocking: { nodes: [] },
+        subIssues: { nodes: [] },
+        comments: { nodes: [] },
+      });
+      const page = (nodes: any[]) => ({
+        stdout: JSON.stringify({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } } }),
+      });
+
+      it('should only ask for issues updated since the last sync and merge them into the cache', async () => {
+        mockedExeca.mockResolvedValueOnce(page([node(2), node(1)]) as any);
+        mockedExeca.mockResolvedValueOnce(page([node(1, 'Renamed')]) as any);
+
+        const client = new GitHubClient({ repository: 'owner/repo' });
+        await client.fetchIssues();
+        const issues = await client.fetchIssues();
+
+        expect(mockedExeca.mock.calls[0][1]).not.toContainEqual(expect.stringMatching(/^since=/));
+        expect(mockedExeca.mock.calls[1][1]).toContainEqual(expect.stringMatching(/^since=/));
+        expect(issues.map((i) => [i.number, i.title])).toEqual([
+          [2, 'Issue 2'],
+          [1, 'Renamed'],
+        ]);
+      });
+
+      it('should re-read every issue once the full sync interval has passed', async () => {
+        mockedExeca.mockResolvedValueOnce(page([node(2), node(1)]) as any);
+        mockedExeca.mockResolvedValueOnce(page([node(2)]) as any);
+
+        const client = new GitHubClient({ repository: 'owner/repo', fullSyncIntervalMs: 0 });
+        await client.fetchIssues();
+        const issues = await client.fetchIssues();
+
+        expect(mockedExeca.mock.calls[1][1]).not.toContainEqual(expect.stringMatching(/^since=/));
+        expect(issues.map((i) => i.number)).toEqual([2]);
+      });
+
+      it('should serve cached issues without calling GitHub while rate limited', async () => {
+        mockedExeca.mockResolvedValueOnce(page([node(1)]) as any);
+        mockedExeca.mockRejectedValueOnce(new Error('GraphQL: API rate limit already exceeded for user ID 1.'));
+        mockedExeca.mockResolvedValueOnce({ stdout: JSON.stringify({ remaining: 0, reset: Date.now() / 1000 + 600 }) } as any);
+
+        const client = new GitHubClient({ repository: 'owner/repo' });
+        await client.fetchIssues();
+        const limited = await client.fetchIssues();
+        const stillLimited = await client.fetchIssues();
+
+        expect(limited.map((i) => i.number)).toEqual([1]);
+        expect(stillLimited.map((i) => i.number)).toEqual([1]);
+        expect(mockedExeca).toHaveBeenCalledTimes(3);
+        expect(mockedExeca).not.toHaveBeenCalledWith('gh', expect.arrayContaining(['issue', 'list']), expect.any(Object));
+      });
+
+      it('should throw instead of falling back to gh issue list when rate limited with an empty cache', async () => {
+        mockedExeca.mockRejectedValueOnce(new Error('GraphQL: API rate limit already exceeded for user ID 1.'));
+        mockedExeca.mockRejectedValueOnce(new Error('network down'));
+
+        const client = new GitHubClient({ repository: 'owner/repo' });
+        await expect(client.fetchIssues()).rejects.toThrow('rate limit');
+        expect(mockedExeca).not.toHaveBeenCalledWith('gh', expect.arrayContaining(['issue', 'list']), expect.any(Object));
+      });
     });
 
     it('should fetch via CLI directly with fetchIssuesViaCli', async () => {

@@ -20,7 +20,7 @@ export const AVAILABLE_COMMANDS: CommandDefinition[] = [
   },
   {
     name: '/enqueue',
-    description: 'Enqueue an issue into priority queue (/enqueue <num> [--force])',
+    description: 'Queue an issue first (/enqueue <num> [--now] [--runner <name>] [--force])',
     aliases: ['enqueue', '/run', 'run', '/dispatch', 'dispatch', '/force-run'],
   },
   {

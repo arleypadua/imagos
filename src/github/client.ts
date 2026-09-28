@@ -2,6 +2,73 @@ import { execa } from 'execa';
 import { ActivityLogger } from '../logger/index.js';
 import type { GitHubIssue } from '../types/index.js';
 
+const MAX_ISSUE_PAGES = 20;
+const FULL_PAGE_SIZE = 100;
+/** A GraphQL page of 25 issues with their nested connections costs 1 point, against ~5 for a page of 100. */
+const INCREMENTAL_PAGE_SIZE = 25;
+const DEFAULT_FULL_SYNC_INTERVAL_MS = 15 * 60 * 1000;
+const SYNC_OVERLAP_MS = 2 * 60 * 1000;
+const RATE_LIMIT_FALLBACK_BACKOFF_MS = 5 * 60 * 1000;
+const SECONDARY_RATE_LIMIT_BACKOFF_MS = 60 * 1000;
+
+interface IssueCache {
+  key: string;
+  issues: Map<number, GitHubIssue>;
+  lastSyncAt?: number;
+  lastFullSyncAt?: number;
+}
+
+/**
+ * Whether an error from a `gh` call is GitHub refusing the request for exceeding a (primary or secondary) rate limit.
+ */
+export function isRateLimitError(err: unknown): boolean {
+  const e = err as { message?: string; stderr?: string; stdout?: string } | undefined;
+  const text = `${e?.message ?? ''}\n${e?.stderr ?? ''}\n${e?.stdout ?? ''}`;
+  return /rate limit|RATE_LIMIT/i.test(text);
+}
+
+function mapGraphQLIssue(node: any): GitHubIssue {
+  return {
+    number: node.number,
+    title: node.title,
+    body: node.body || '',
+    state: node.state,
+    url: node.url,
+    createdAt: node.createdAt,
+    updatedAt: node.updatedAt,
+    labels: (node.labels?.nodes || []).map((l: any) => ({
+      name: l.name,
+      color: l.color,
+      description: l.description,
+    })),
+    parent: node.parent ? { number: node.parent.number, title: node.parent.title } : undefined,
+    blockedBy: (node.blockedBy?.nodes || []).map((b: any) => ({
+      number: b.number,
+      title: b.title,
+      state: b.state,
+    })),
+    blocking: (node.blocking?.nodes || []).map((b: any) => ({
+      number: b.number,
+      title: b.title,
+      state: b.state,
+    })),
+    subIssues: (node.subIssues?.nodes || []).map((s: any) => ({
+      number: s.number,
+      title: s.title,
+      state: s.state,
+    })),
+    comments: (node.comments?.nodes || []).map((c: any) => ({
+      id: c.id,
+      author: {
+        login: c.author?.login || '',
+      },
+      body: c.body || '',
+      createdAt: c.createdAt,
+      updatedAt: c.updatedAt,
+    })),
+  };
+}
+
 /**
  * Options for configuring a {@link GitHubClient} instance.
  */
@@ -15,6 +82,11 @@ export interface GitHubClientOptions {
    * @defaultValue `process.cwd()`
    */
   cwd?: string;
+  /**
+   * How often {@link GitHubClient.fetchIssues} re-reads every issue instead of only the ones updated since the last poll.
+   * @defaultValue 15 minutes
+   */
+  fullSyncIntervalMs?: number;
 }
 
 /**
@@ -66,6 +138,9 @@ export interface MergePROptions {
 export class GitHubClient {
   private repository?: string;
   private cwd: string;
+  private fullSyncIntervalMs: number;
+  private cache?: IssueCache;
+  private rateLimitedUntil = 0;
 
   /**
    * Initializes a new instance of the {@link GitHubClient}.
@@ -75,6 +150,7 @@ export class GitHubClient {
   constructor(options: GitHubClientOptions = {}) {
     this.repository = options.repository;
     this.cwd = options.cwd ?? process.cwd();
+    this.fullSyncIntervalMs = options.fullSyncIntervalMs ?? DEFAULT_FULL_SYNC_INTERVAL_MS;
   }
 
   /**
@@ -84,6 +160,7 @@ export class GitHubClient {
    */
   public setRepository(repo: string): void {
     this.repository = repo;
+    this.cache = undefined;
   }
 
   /**
@@ -149,12 +226,23 @@ export class GitHubClient {
 
   /**
    * Fetches issues via GitHub GraphQL API, including native relationships (blockedBy, blocking, parent, subIssues).
+   *
+   * Pages through the whole repository. A single unpaginated page silently drops the oldest issues
+   * once a repo passes the page size, which both hides them from the scheduler and makes their
+   * closed blockers read as missing — and a missing blocker leaves its dependents blocked forever.
+   *
+   * @param since - When set, only issues updated at or after this ISO timestamp are returned
+   *   (an incremental sync), in smaller pages since few issues change between polls.
    */
-  public async fetchIssuesViaGraphQL(owner: string, repoName: string): Promise<GitHubIssue[]> {
+  public async fetchIssuesViaGraphQL(owner: string, repoName: string, since?: string): Promise<GitHubIssue[]> {
     const query = `
-      query($owner: String!, $repo: String!) {
+      query($owner: String!, $repo: String!, $after: String, $first: Int!, $since: DateTime) {
         repository(owner: $owner, name: $repo) {
-          issues(first: 100, states: [OPEN, CLOSED], orderBy: {field: CREATED_AT, direction: DESC}) {
+          issues(first: $first, after: $after, states: [OPEN, CLOSED], filterBy: {since: $since}, orderBy: {field: ${since ? 'UPDATED_AT' : 'CREATED_AT'}, direction: DESC}) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
             nodes {
               number
               title
@@ -212,9 +300,11 @@ export class GitHubClient {
       }
     `;
 
-    const { stdout } = await execa(
-      'gh',
-      [
+    const issues: GitHubIssue[] = [];
+    let cursor: string | undefined;
+
+    for (let page = 0; page < MAX_ISSUE_PAGES; page++) {
+      const args = [
         'api',
         'graphql',
         '-f',
@@ -223,55 +313,30 @@ export class GitHubClient {
         `owner=${owner}`,
         '-F',
         `repo=${repoName}`,
-      ],
-      { cwd: this.cwd }
-    );
+        '-F',
+        `first=${since ? INCREMENTAL_PAGE_SIZE : FULL_PAGE_SIZE}`,
+        ...(since ? ['-f', `since=${since}`] : []),
+        ...(cursor ? ['-f', `after=${cursor}`] : []),
+      ];
 
-    const data = JSON.parse(stdout);
-    const issueNodes = data.data?.repository?.issues?.nodes;
-    if (!Array.isArray(issueNodes)) {
-      throw new Error('GraphQL response did not contain repository issues');
+      const { stdout } = await execa('gh', args, { cwd: this.cwd });
+
+      const data = JSON.parse(stdout);
+      const connection = data.data?.repository?.issues;
+      const issueNodes = connection?.nodes;
+      if (!Array.isArray(issueNodes)) {
+        throw new Error('GraphQL response did not contain repository issues');
+      }
+
+      issues.push(...issueNodes.map((node: any) => mapGraphQLIssue(node)));
+
+      if (!connection.pageInfo?.hasNextPage || !connection.pageInfo?.endCursor) {
+        return issues;
+      }
+      cursor = connection.pageInfo.endCursor;
     }
 
-    return issueNodes.map((node: any) => ({
-      number: node.number,
-      title: node.title,
-      body: node.body || '',
-      state: node.state,
-      url: node.url,
-      createdAt: node.createdAt,
-      updatedAt: node.updatedAt,
-      labels: (node.labels?.nodes || []).map((l: any) => ({
-        name: l.name,
-        color: l.color,
-        description: l.description,
-      })),
-      parent: node.parent ? { number: node.parent.number, title: node.parent.title } : undefined,
-      blockedBy: (node.blockedBy?.nodes || []).map((b: any) => ({
-        number: b.number,
-        title: b.title,
-        state: b.state,
-      })),
-      blocking: (node.blocking?.nodes || []).map((b: any) => ({
-        number: b.number,
-        title: b.title,
-        state: b.state,
-      })),
-      subIssues: (node.subIssues?.nodes || []).map((s: any) => ({
-        number: s.number,
-        title: s.title,
-        state: s.state,
-      })),
-      comments: (node.comments?.nodes || []).map((c: any) => ({
-        id: c.id,
-        author: {
-          login: c.author?.login || '',
-        },
-        body: c.body || '',
-        createdAt: c.createdAt,
-        updatedAt: c.updatedAt,
-      })),
-    }));
+    return issues;
   }
 
   /**
@@ -279,7 +344,7 @@ export class GitHubClient {
    */
   public async fetchIssuesViaCli(repo?: string): Promise<GitHubIssue[]> {
     const fields = 'number,title,body,state,labels,url,createdAt,updatedAt,comments';
-    const args = ['issue', 'list', '--state', 'all', '--limit', '100', ...this.repoArgs(repo), '--json', fields];
+    const args = ['issue', 'list', '--state', 'all', '--limit', String(MAX_ISSUE_PAGES * 100), ...this.repoArgs(repo), '--json', fields];
 
     const { stdout } = await execa('gh', args, { cwd: this.cwd });
     if (!stdout.trim()) {
@@ -297,21 +362,105 @@ export class GitHubClient {
   /**
    * Fetches issues from the repository using the GitHub GraphQL API, falling back to GitHub CLI list.
    *
+   * Issues are cached per repository: the first call (and one every {@link GitHubClientOptions.fullSyncIntervalMs})
+   * pages through the whole repository, while calls in between only ask for issues updated since the previous
+   * sync and merge them into the cache. A poll therefore costs one small GraphQL page instead of the whole
+   * repository, which on a repo with ~1000 issues is the difference between staying well inside the hourly
+   * GraphQL budget and exhausting it. The periodic full sync picks up the few edits that do not bump an issue's
+   * `updatedAt` (e.g. relationship changes made from the other side) and drops deleted/transferred issues.
+   *
+   * When GitHub reports a rate limit, the client stops calling GraphQL until the limit resets and serves the
+   * cached issues meanwhile. It never falls back to `gh issue list` in that case, since that also runs on GraphQL.
+   *
    * @param repo - Optional repository override in `owner/repo` format. If omitted, the configured default repository is used.
-   * @returns A promise resolving to an array of {@link GitHubIssue} objects.
+   * @returns A promise resolving to an array of {@link GitHubIssue} objects, newest issue number first.
    * @throws {Error} If the command fails or if the command output cannot be parsed as JSON.
    */
   public async fetchIssues(repo?: string): Promise<GitHubIssue[]> {
-    try {
-      const repoInfo = await this.getRepoOwnerAndName(repo);
-      if (repoInfo) {
-        return await this.fetchIssuesViaGraphQL(repoInfo.owner, repoInfo.repo);
+    const repoInfo = await this.getRepoOwnerAndName(repo);
+    if (repoInfo) {
+      const cacheKey = `${repoInfo.owner}/${repoInfo.repo}`;
+      if (this.cache?.key !== cacheKey) {
+        this.cache = { key: cacheKey, issues: new Map() };
       }
-    } catch {
-      // Fallback to CLI
+      const cache = this.cache;
+
+      if (this.rateLimitedUntil > Date.now()) {
+        if (cache.lastSyncAt !== undefined) {
+          return this.cachedIssues(cache);
+        }
+        throw new Error(`GitHub API rate limit exceeded; retrying after ${new Date(this.rateLimitedUntil).toLocaleTimeString()}`);
+      }
+
+      const syncStartedAt = Date.now();
+      const isFullSync =
+        cache.lastSyncAt === undefined ||
+        cache.lastFullSyncAt === undefined ||
+        syncStartedAt - cache.lastFullSyncAt >= this.fullSyncIntervalMs;
+
+      try {
+        if (isFullSync) {
+          const issues = await this.fetchIssuesViaGraphQL(repoInfo.owner, repoInfo.repo);
+          cache.issues = new Map(issues.map((issue) => [issue.number, issue]));
+          cache.lastFullSyncAt = syncStartedAt;
+        } else {
+          // Overlap the window a little so clock skew between this machine and GitHub cannot lose an update.
+          const since = new Date(cache.lastSyncAt! - SYNC_OVERLAP_MS).toISOString();
+          const changed = await this.fetchIssuesViaGraphQL(repoInfo.owner, repoInfo.repo, since);
+          for (const issue of changed) {
+            cache.issues.set(issue.number, issue);
+          }
+        }
+        cache.lastSyncAt = syncStartedAt;
+        return this.cachedIssues(cache);
+      } catch (err) {
+        if (isRateLimitError(err)) {
+          this.rateLimitedUntil = await this.getGraphQLRateLimitReset();
+          const retryAt = new Date(this.rateLimitedUntil).toLocaleTimeString();
+          if (cache.lastSyncAt !== undefined) {
+            ActivityLogger.warn(`GitHub API rate limit exceeded; showing cached issues until ${retryAt}.`);
+            return this.cachedIssues(cache);
+          }
+          throw new Error(`GitHub API rate limit exceeded; retrying after ${retryAt}`);
+        }
+        // Fallback to CLI
+      }
     }
 
     return this.fetchIssuesViaCli(repo);
+  }
+
+  /**
+   * Forgets the cached issues so the next {@link fetchIssues} call performs a full sync.
+   */
+  public invalidateIssueCache(): void {
+    this.cache = undefined;
+  }
+
+  private cachedIssues(cache: IssueCache): GitHubIssue[] {
+    return [...cache.issues.values()].sort((a, b) => b.number - a.number);
+  }
+
+  /**
+   * Returns when the GraphQL rate limit resets (epoch ms). The `rate_limit` REST endpoint does not count
+   * against any limit, so asking it is free; if it fails, back off for a fixed interval instead.
+   */
+  private async getGraphQLRateLimitReset(): Promise<number> {
+    const fallback = Date.now() + RATE_LIMIT_FALLBACK_BACKOFF_MS;
+    try {
+      const { stdout } = await execa('gh', ['api', 'rate_limit', '--jq', '.resources.graphql'], { cwd: this.cwd });
+      const graphql = JSON.parse(stdout);
+      // Still budget left means a secondary (per-minute) limit tripped; those clear within about a minute.
+      if (typeof graphql?.remaining === 'number' && graphql.remaining > 0) {
+        return Date.now() + SECONDARY_RATE_LIMIT_BACKOFF_MS;
+      }
+      if (typeof graphql?.reset === 'number') {
+        return Math.max(graphql.reset * 1000, Date.now() + SECONDARY_RATE_LIMIT_BACKOFF_MS);
+      }
+    } catch {
+      // Use the fixed backoff
+    }
+    return fallback;
   }
 
   /**

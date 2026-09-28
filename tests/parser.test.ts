@@ -3,110 +3,6 @@ import { parseIssueDependencies } from '../src/github/parser.js';
 import type { GitHubIssue } from '../src/types/index.js';
 
 describe('parseIssueDependencies', () => {
-  it('should parse "Blocked by #10" in issue body', () => {
-    const issue: GitHubIssue = {
-      number: 15,
-      title: 'Implement database migrations',
-      body: 'We need migrations.\n\nBlocked by #10\nDepends on: #12',
-      state: 'OPEN',
-      labels: [{ name: 'ready-for-agent' }],
-      url: 'https://github.com/owner/repo/issues/15',
-      createdAt: '2026-08-19T10:00:00Z',
-      updatedAt: '2026-08-19T10:00:00Z',
-    };
-
-    const deps = parseIssueDependencies(issue);
-    expect(deps.blockers).toContain(10);
-    expect(deps.blockers).toContain(12);
-    expect(deps.kind).toBe('standalone');
-  });
-
-  it('should parse parent issue references and mark as ticket', () => {
-    const issue: GitHubIssue = {
-      number: 22,
-      title: 'Add JWT auth middleware',
-      body: 'Parent: #20\n\nImplement the JWT validator middleware.',
-      state: 'OPEN',
-      labels: [{ name: 'ready-for-agent' }],
-      url: 'https://github.com/owner/repo/issues/22',
-      createdAt: '2026-08-19T10:00:00Z',
-      updatedAt: '2026-08-19T10:00:00Z',
-    };
-
-    const deps = parseIssueDependencies(issue);
-    expect(deps.parentNumber).toBe(20);
-    expect(deps.kind).toBe('ticket');
-  });
-
-  it('should parse markdown header sections with markdown links like ## Blocked by\\n\\n[#222](url)', () => {
-    const issue: GitHubIssue = {
-      number: 223,
-      title: "Declare the guest's JS surface: shim MessageChannel",
-      body: `## Acceptance criteria
-
-- [ ] A guest whose module constructs MessageChannel evaluates
-
-## Blocked by
-
-[#222](https://github.com/wawesomeio/wawesome-monorepo/issues/222) — declaring that gaps "fail loudly" is not true while a module-scope ReferenceError reaches the Tenant as Exited with i32 exit status 1.
-
-## Related
-
-- [#185](https://github.com/wawesomeio/wawesome-monorepo/issues/185)
-`,
-      state: 'OPEN',
-      labels: [{ name: 'ready-for-agent' }],
-      url: 'https://github.com/wawesomeio/wawesome-monorepo/issues/223',
-      createdAt: '2026-08-19T10:00:00Z',
-      updatedAt: '2026-08-19T10:00:00Z',
-    };
-
-    const deps = parseIssueDependencies(issue);
-    expect(deps.blockers).toContain(222);
-  });
-
-  it('should parse parent header sections like ## Parent\\n\\n#17', () => {
-    const issue: GitHubIssue = {
-      number: 35,
-      title: 'Follow-up to #31: cross-instance eviction robustness',
-      body: `## Parent
-
-#17 — Real-time log streaming & storage for Function invocations
-
-## Context
-
-Follow-up to #31.
-`,
-      state: 'OPEN',
-      labels: [{ name: 'ready-for-agent' }],
-      url: 'https://github.com/wawesomeio/wawesome-monorepo/issues/35',
-      createdAt: '2026-08-19T10:00:00Z',
-      updatedAt: '2026-08-19T10:00:00Z',
-    };
-
-    const deps = parseIssueDependencies(issue);
-    expect(deps.parentNumber).toBe(17);
-    expect(deps.kind).toBe('ticket');
-  });
-
-  it('should not treat subtasks as blockers when inline Blocked by is used', () => {
-    const issue: GitHubIssue = {
-      number: 10,
-      title: '[Spec] Auth System',
-      body: 'Blocked by #5\nSubtasks:\n- [ ] #11\n- [ ] #12',
-      state: 'OPEN',
-      labels: [{ name: 'ready-for-agent' }],
-      url: 'https://github.com/owner/repo/issues/10',
-      createdAt: '2026-08-19T10:00:00Z',
-      updatedAt: '2026-08-19T10:00:00Z',
-    };
-
-    const deps = parseIssueDependencies(issue);
-    expect(deps.blockers).toEqual([5]);
-    expect(deps.subTaskNumbers).toEqual([11, 12]);
-    expect(deps.kind).toBe('spec');
-  });
-
   it('should parse native GitHub blockedBy, parent, and subIssues', () => {
     const issue: GitHubIssue = {
       number: 187,
@@ -151,24 +47,78 @@ Follow-up to #31.
     expect(deps.kind).toBe('ticket');
   });
 
-  it('should merge native GitHub relationships with markdown body relationships', () => {
+  it('should ignore relationships written in the body', () => {
     const issue: GitHubIssue = {
       number: 50,
-      title: 'Task with mixed deps',
-      body: 'Blocked by #10\nParent: #100',
+      title: 'Task with body-only deps',
+      body: '## Blocked by\n\n[#10](https://github.com/owner/repo/issues/10)\n\nParent: #100\n\nSubtasks:\n- [ ] #51',
       state: 'OPEN',
       labels: [{ name: 'ready-for-agent' }],
       url: 'https://github.com/owner/repo/issues/50',
       createdAt: '2026-08-19T10:00:00Z',
       updatedAt: '2026-08-19T10:00:00Z',
       blockedBy: [{ number: 20, title: 'Native blocker', state: 'OPEN' }],
-      subIssues: [{ number: 51, title: 'Native subtask', state: 'OPEN' }],
+      subIssues: [{ number: 52, title: 'Native subtask', state: 'OPEN' }],
+      parent: { number: 101, title: 'Native parent' },
     };
 
     const deps = parseIssueDependencies(issue);
-    expect(deps.blockers.sort()).toEqual([10, 20]);
-    expect(deps.parentNumber).toBe(100);
-    expect(deps.subTaskNumbers).toEqual([51]);
-    expect(deps.kind).toBe('ticket');
+    expect(deps.blockers).toEqual([20]);
+    expect(deps.parentNumber).toBe(101);
+    expect(deps.subTaskNumbers).toEqual([52]);
+  });
+
+  it('should not read a blocker out of prose that names another issue', () => {
+    const issue: GitHubIssue = {
+      number: 549,
+      title: 'Spec: Custom domains for an App',
+      body: '## Acceptance criteria\n\n- [ ] A domain serves\n\n**Why this ordering.** [#536](https://github.com/owner/repo/issues/536) depends on it: an App cannot change owner.',
+      state: 'OPEN',
+      labels: [{ name: 'ready-for-agent' }],
+      url: 'https://github.com/owner/repo/issues/549',
+      createdAt: '2026-08-31T10:00:00Z',
+      updatedAt: '2026-08-31T10:00:00Z',
+      subIssues: [{ number: 550, title: 'Spike', state: 'OPEN' }],
+    };
+
+    const deps = parseIssueDependencies(issue);
+    expect(deps.blockers).toEqual([]);
+    expect(deps.kind).toBe('spec');
+  });
+
+  it('should classify a Spec as kind "spec" even when it has a parent (nested under an epic)', () => {
+    const issue: GitHubIssue = {
+      number: 380,
+      title: 'Spec: operator restriction — make a Function, App or Tenant unreachable, recorded',
+      body: 'Spec for #376. Decisions were settled in a grilling session on 2026-08-24.',
+      state: 'OPEN',
+      labels: [{ name: 'ready-for-agent' }],
+      url: 'https://github.com/wawesomeio/wawesome-monorepo/issues/380',
+      createdAt: '2026-08-24T12:00:00Z',
+      updatedAt: '2026-08-24T12:00:00Z',
+      parent: { number: 376, title: 'Epic: Liability shield' },
+      subIssues: [{ number: 381, title: 'Restrict and lift an App, recorded', state: 'OPEN' }],
+    };
+
+    const deps = parseIssueDependencies(issue);
+    expect(deps.parentNumber).toBe(376);
+    expect(deps.subTaskNumbers).toEqual([381]);
+    expect(deps.kind).toBe('spec');
+  });
+
+  it('should classify issues with spec/epic labels as spec kind', () => {
+    const issue: GitHubIssue = {
+      number: 400,
+      title: 'General overhaul',
+      body: 'Overview of the overhaul.',
+      state: 'OPEN',
+      labels: [{ name: 'ready-for-agent' }, { name: 'epic' }],
+      url: 'https://github.com/owner/repo/issues/400',
+      createdAt: '2026-08-24T12:00:00Z',
+      updatedAt: '2026-08-24T12:00:00Z',
+    };
+
+    const deps = parseIssueDependencies(issue);
+    expect(deps.kind).toBe('spec');
   });
 });

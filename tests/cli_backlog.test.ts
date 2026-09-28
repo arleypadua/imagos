@@ -41,7 +41,8 @@ describe('imagos backlog --json', () => {
     {
       number: 2,
       title: 'Blocked Task',
-      body: 'Blocked by #1',
+      body: '',
+      blockedBy: [{ number: 1 }],
       state: 'OPEN',
       labels: [{ name: 'ready-for-agent' }],
       url: 'https://github.com/test/repo/issues/2',
@@ -81,7 +82,8 @@ describe('imagos backlog --json', () => {
     {
       number: 50,
       title: '[Spec] Feature Spec',
-      body: 'Subtasks:\n- [ ] #51',
+      body: '',
+      subIssues: [{ number: 51 }],
       state: 'OPEN',
       labels: [{ name: 'ready-for-agent' }],
       url: 'https://github.com/test/repo/issues/50',
@@ -91,7 +93,8 @@ describe('imagos backlog --json', () => {
     {
       number: 51,
       title: 'Spec Child Task',
-      body: 'Parent: #50',
+      body: '',
+      parent: { number: 50 },
       state: 'OPEN',
       labels: [{ name: 'ready-for-agent' }],
       url: 'https://github.com/test/repo/issues/51',

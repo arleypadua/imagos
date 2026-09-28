@@ -95,7 +95,7 @@ You can customize runner options in `.autopilot/config.json`. For example, to se
 
 ## How It Works (The Lifecycle)
 
-1. **Refine your issues**: Write clear acceptance criteria (conditions that must be met for a task to be considered done) and declare any blockers or parent specs directly in the issue body (for example `Blocked by #101` or `Parent: #50`).
+1. **Refine your issues**: Write clear acceptance criteria (conditions that must be met for a task to be considered done) and declare any blockers or parent specs using GitHub's own issue relationships — the **Relationships** panel on the issue, or the `gh` CLI.
 2. **Tag `ready-for-agent`**: Add the `ready-for-agent` label to issues that are ready to be worked on.
 3. **Automated dispatch**: Imagos checks the backlog, resolves dependencies using a DAG (directed acyclic graph, a structure that ensures tasks only run after their prerequisites finish), and assigns ready tasks to workers up to your concurrency limit (the maximum number of tasks running at the same time).
 4. **Isolated execution**: Each task runs in its own git worktree (`.autopilot/worktrees/issue-<number>`), keeping your main working directory clean and preventing tasks from conflicting with each other.
@@ -111,28 +111,24 @@ You can customize runner options in `.autopilot/config.json`. For example, to se
 
 Imagos uses standard GitHub issues and labels to manage tasks without requiring external databases.
 
-### Dependency Syntax
+### Declaring Relationships
 
-You can define relationships directly in your issue descriptions:
+Imagos reads relationships from GitHub's native issue fields only — dependencies,
+parent, and sub-issues. Nothing written in an issue body is treated as a relationship,
+so prose that mentions another issue can never be mistaken for a dependency.
 
-```markdown
-### Blockers and Prerequisites
+Set them in the issue's **Relationships** panel, or from the CLI:
 
-Blocked by #101
-Depends on: #102, #103
-
-### Parent Spec
-
-Parent: #50
-
-### Child Subtasks (inside a parent spec issue)
-
-- [ ] #51
-- [ ] #52
-- [x] #53
+```bash
+# Mark #102 as blocking #101 — pass the blocker's numeric database id, not its number
+gh api --method POST repos/<owner>/<repo>/issues/101/dependencies/blocked_by \
+  -F issue_id="$(gh api repos/<owner>/<repo>/issues/102 --jq .id)"
 ```
 
-Imagos will hold off on starting a task until all of its blockers are closed.
+Sub-issues give a spec its children, and the child its parent.
+
+Imagos will hold off on starting a task until all of its blockers are closed, and a
+child inherits every blocker on the specs above it.
 
 ### The 5 Canonical Labels
 

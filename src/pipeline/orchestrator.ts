@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { execa } from "execa";
-import type { AutoPilotConfig, DAGNode, ProviderInfo, EnqueueTaskOptions, EnqueueResult } from "../types/index.js";
-import { GitHubClient } from "../github/client.js";
+import type { AutoPilotConfig, DAGNode, GitHubIssue, ProviderInfo, EnqueueTaskOptions, EnqueueResult } from "../types/index.js";
+import { GitHubClient, isRateLimitError } from "../github/client.js";
 import { IssueDAG } from "../github/dag.js";
 import { WorktreeManager } from "../worktree/manager.js";
 import { QuotaMonitor } from "../quota/monitor.js";
@@ -27,6 +27,7 @@ import type {
   TaskItemSummary,
   IssueTreeSummary,
   SpecTreeSummary,
+  BrowseIssueSummary,
   ChildTicketSummary,
   StandaloneIssueSummary,
 } from "../remote/types.js";
@@ -48,6 +49,9 @@ export class Orchestrator implements RemoteActionController {
   private pollTimer?: NodeJS.Timeout;
   private activeTaskNumbers: Set<number> = new Set();
   private manualPriorityQueue: number[] = [];
+  private burstIssues: Set<number> = new Set();
+  private burstTaskNumbers: Set<number> = new Set();
+  private runnerOverrides: Map<number, string> = new Map();
   private lastKnownFeedbackQuestions: Map<number, string> = new Map();
   private notifiedSpecCompletions: Set<number> = new Set();
   private tickListeners: Array<() => void> = [];
@@ -134,7 +138,9 @@ export class Orchestrator implements RemoteActionController {
         return;
       }
       const waitMinutes = Math.ceil(waitMs / (60 * 1000));
-      this.stateMgr.updateDaemonStatus("paused_quota", resetAt.toISOString());
+      if (this.quotaMonitor.areAllRunnersPaused()) {
+        this.stateMgr.updateDaemonStatus("paused_quota", resetAt.toISOString());
+      }
       const activeTasks =
         affectedIssues && affectedIssues.length > 0
           ? affectedIssues
@@ -165,7 +171,9 @@ export class Orchestrator implements RemoteActionController {
       ) {
         return;
       }
-      this.stateMgr.updateDaemonStatus("running");
+      this.stateMgr.updateDaemonStatus(
+        this.quotaMonitor.areAllRunnersPaused() ? "paused_quota" : "running",
+      );
       Notifier.notifyQuotaResumed(runnerName);
       const runnerStr = runnerName ? ` for ${runnerName}` : "";
       this.dashboard.log(
@@ -196,6 +204,28 @@ export class Orchestrator implements RemoteActionController {
 
   public getPriorityQueue(): number[] {
     return [...this.manualPriorityQueue];
+  }
+
+  /**
+   * A task dispatched on a burst slot does not count against the ceiling, so the ceiling drops
+   * back on its own when that task ends and there is nothing to reset by hand.
+   */
+  public getAvailableSlots(): number {
+    return (
+      this.config.maxConcurrency -
+      (this.activeTaskNumbers.size - this.burstTaskNumbers.size)
+    );
+  }
+
+  public getBurstSlots(): { pending: number[]; running: number[] } {
+    return {
+      pending: Array.from(this.burstIssues),
+      running: Array.from(this.burstTaskNumbers),
+    };
+  }
+
+  public getRunnerOverrides(): Record<number, string> {
+    return Object.fromEntries(this.runnerOverrides);
   }
 
   public setTargetSpecs(specs: number[]): void {
@@ -270,8 +300,13 @@ export class Orchestrator implements RemoteActionController {
     // Initial fetch of Claude live usage from /usage
     await this.quotaMonitor.fetchLiveUsage(true);
 
-    // Initial tick
-    await this.tick();
+    // Initial tick. A rate-limited GitHub API is transient: keep the daemon up and let polling retry.
+    try {
+      await this.tick();
+    } catch (err: any) {
+      if (!isRateLimitError(err)) throw err;
+      this.dashboard.log(`Initial tick skipped: ${err.message}`);
+    }
 
     // Setup polling
     this.pollTimer = setInterval(async () => {
@@ -421,18 +456,20 @@ export class Orchestrator implements RemoteActionController {
     }
 
     // 6. Schedule Tasks up to maxConcurrency
-    let availableSlots =
-      this.config.maxConcurrency - this.activeTaskNumbers.size;
+    let availableSlots = this.getAvailableSlots();
 
-    if (availableSlots <= 0) {
+    if (availableSlots <= 0 && this.burstIssues.size === 0) {
       return;
     }
 
     // 6a. Priority Queue Scheduling (Explicitly enqueued issues)
     for (const priorityIssueNum of [...this.manualPriorityQueue]) {
-      if (availableSlots <= 0) break;
+      const hasBurstSlot = this.burstIssues.has(priorityIssueNum);
+      if (availableSlots <= 0 && !hasBurstSlot) break;
       if (this.activeTaskNumbers.has(priorityIssueNum)) {
         this.manualPriorityQueue = this.manualPriorityQueue.filter((n) => n !== priorityIssueNum);
+        this.burstIssues.delete(priorityIssueNum);
+        this.runnerOverrides.delete(priorityIssueNum);
         continue;
       }
 
@@ -450,10 +487,7 @@ export class Orchestrator implements RemoteActionController {
       }
 
       if (node) {
-        const runnerName = this.runnerFacade.resolveRunnerName(
-          node.issue,
-          this.config.runner,
-        );
+        const runnerName = this.runnerFor(node.issue);
         const isAllowed = this.runnerFacade.isProviderAllowed(runnerName);
         if (!isAllowed || this.quotaMonitor.isRunnerPaused(runnerName)) {
           continue;
@@ -461,10 +495,17 @@ export class Orchestrator implements RemoteActionController {
 
         this.manualPriorityQueue = this.manualPriorityQueue.filter((n) => n !== priorityIssueNum);
         this.activeTaskNumbers.add(priorityIssueNum);
-        availableSlots--;
+        if (hasBurstSlot) {
+          this.burstIssues.delete(priorityIssueNum);
+          this.burstTaskNumbers.add(priorityIssueNum);
+        } else {
+          availableSlots--;
+        }
 
         this.executeTask(node, undefined, 0).finally(() => {
           this.activeTaskNumbers.delete(node!.issue.number);
+          this.burstTaskNumbers.delete(node!.issue.number);
+          this.runnerOverrides.delete(node!.issue.number);
           this.dashboard.removeWorker(node!.issue.number);
         });
       }
@@ -542,6 +583,13 @@ export class Orchestrator implements RemoteActionController {
     };
   }
 
+  private runnerFor(issue: GitHubIssue): string {
+    return (
+      this.runnerOverrides.get(issue.number) ??
+      this.runnerFacade.resolveRunnerName(issue, this.config.runner)
+    );
+  }
+
   private async executeTask(
     node: DAGNode,
     overrideFeedback?: string,
@@ -550,10 +598,7 @@ export class Orchestrator implements RemoteActionController {
   ): Promise<void> {
     const { issue } = node;
     const isContinuation = await this.worktreeMgr.worktreeExists(issue.number);
-    const runnerName = this.runnerFacade.resolveRunnerName(
-      issue,
-      this.config.runner,
-    );
+    const runnerName = this.runnerFor(issue);
 
     this.dashboard.log(
       `Dispatching Issue #${issue.number} [${runnerName}]: ${issue.title} ${
@@ -1432,6 +1477,19 @@ ${autoMergeStep}
     options?: EnqueueTaskOptions,
   ): Promise<EnqueueResult> {
     const force = options?.force ?? false;
+    const now = options?.now ?? false;
+    const runner = options?.runner;
+
+    if (runner) {
+      const known = this.runnerFacade.getRegistry().list();
+      const allowed = known.filter((name) => this.runnerFacade.isProviderAllowed(name));
+      if (!allowed.map((name) => name.toLowerCase()).includes(runner.toLowerCase())) {
+        return {
+          success: false,
+          message: `Unknown or disallowed runner \`${runner}\`. Available: ${allowed.join(", ")}.`,
+        };
+      }
+    }
 
     // 1. Check if already active
     if (this.activeTaskNumbers.has(issueNumber)) {
@@ -1441,11 +1499,29 @@ ${autoMergeStep}
       };
     }
 
-    // 2. Check if already in priority queue
+    // 2. Already queued — an added burst slot or runner still upgrades the pending entry
     if (this.manualPriorityQueue.includes(issueNumber)) {
+      const upgrades: string[] = [];
+      if (now && !this.burstIssues.has(issueNumber)) {
+        this.burstIssues.add(issueNumber);
+        upgrades.push("an extra worker slot");
+      }
+      if (runner && this.runnerOverrides.get(issueNumber) !== runner) {
+        this.runnerOverrides.set(issueNumber, runner);
+        upgrades.push(`runner \`${runner}\``);
+      }
+
+      if (upgrades.length === 0) {
+        return {
+          success: false,
+          message: `Issue #${issueNumber} is already in the priority queue.`,
+        };
+      }
+
+      this.tick().catch(() => {});
       return {
-        success: false,
-        message: `Issue #${issueNumber} is already in the priority queue.`,
+        success: true,
+        message: `Issue #${issueNumber} was already queued. Added ${upgrades.join(" and ")}.`,
       };
     }
 
@@ -1505,6 +1581,7 @@ ${autoMergeStep}
       for (const childId of childIds) {
         if (!this.manualPriorityQueue.includes(childId) && !this.activeTaskNumbers.has(childId)) {
           this.manualPriorityQueue.push(childId);
+          if (runner) this.runnerOverrides.set(childId, runner);
           addedCount++;
         }
       }
@@ -1516,9 +1593,19 @@ ${autoMergeStep}
       );
       this.tick().catch(() => {});
 
+      const specNotes = [
+        runner ? `All of them run on \`${runner}\`.` : "",
+        now
+          ? "`--now` was ignored: a spec would claim one extra slot per ticket. Pass it per ticket."
+          : "",
+      ].filter(Boolean);
+
       return {
         success: true,
-        message: `Enqueued ${addedCount} child ticket(s) for Spec #${issueNumber} into priority queue.`,
+        message: [
+          `Enqueued ${addedCount} child ticket(s) for Spec #${issueNumber} into priority queue.`,
+          ...specNotes,
+        ].join(" "),
         childNumbers: childIds,
         isSpec: true,
       };
@@ -1546,12 +1633,32 @@ ${autoMergeStep}
 
     // 7. Add to manual priority queue
     this.manualPriorityQueue.push(issueNumber);
-    this.dashboard.log(`Priority enqueued Issue #${issueNumber}: ${node.issue.title}`);
+    if (now) this.burstIssues.add(issueNumber);
+    if (runner) this.runnerOverrides.set(issueNumber, runner);
+
+    const runnerName = this.runnerFor(node.issue);
+    const notes = [
+      now ? "on an extra worker slot" : "",
+      runner ? `on runner \`${runner}\`` : "",
+    ].filter(Boolean);
+
+    this.dashboard.log(
+      `Priority enqueued Issue #${issueNumber}${
+        notes.length > 0 ? ` (${notes.join(", ")})` : ""
+      }: ${node.issue.title}`,
+    );
     this.tick().catch(() => {});
+
+    const waiting = this.quotaMonitor.isRunnerPaused(runnerName)
+      ? ` \`${runnerName}\` is quota-paused, so it starts when the quota resets.`
+      : "";
 
     return {
       success: true,
-      message: `Enqueued Issue #${issueNumber} into priority queue.`,
+      message:
+        `Enqueued Issue #${issueNumber} into priority queue${
+          notes.length > 0 ? ` ${notes.join(", ")}` : ""
+        }.` + waiting,
     };
   }
 
@@ -1682,6 +1789,13 @@ ${autoMergeStep}
       targetSpecs: this.dag.getTargetSpecs(),
       specs,
     };
+  }
+
+  public getBrowseIssues(): BrowseIssueSummary[] {
+    return this.dag.getOpenNodesByPriority().map((n) => ({
+      number: n.issue.number,
+      title: n.issue.title,
+    }));
   }
 
   public getIssueTreeSummary(): IssueTreeSummary {
