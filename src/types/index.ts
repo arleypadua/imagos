@@ -87,6 +87,8 @@ export interface TaskContext {
   runnerName?: string;
   autoMerge?: boolean;
   mergeMethod?: 'squash' | 'merge' | 'rebase';
+  /** Set when the issue lives in a different repository than the code, in `owner/repo` format. */
+  issueRepository?: string;
 }
 
 export interface RunnerResult {
@@ -257,6 +259,8 @@ export interface ProviderInfo {
 
 export interface AutoPilotConfig {
   repository?: string;
+  /** Repository issues are sourced from, when it differs from `repository` (where code and PRs live). */
+  issueRepository?: string;
   targetSpec?: number | number[];
   targetSpecs?: number[];
   baseBranch: string;

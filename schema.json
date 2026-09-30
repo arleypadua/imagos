@@ -9,6 +9,11 @@
       "pattern": "^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$",
       "description": "Target GitHub repository in 'owner/repo' format (e.g. 'arleypadua/imagos')"
     },
+    "issueRepository": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$",
+      "description": "Repository issues are sourced from, in 'owner/repo' format, when it differs from 'repository' (where code changes and pull requests land). Defaults to 'repository'."
+    },
     "targetSpec": {
       "oneOf": [
         { "type": "integer" },

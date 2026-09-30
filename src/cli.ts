@@ -14,6 +14,10 @@ import {
   detectRepository,
   getConfigPath,
   parseSpecsOption,
+  getIssueRepository,
+  getExternalIssueRepository,
+  formatRepoLabel,
+  REPOSITORY_PATTERN,
   loadUserConfig,
   saveTelegramBot,
   parseAllowedChatIds,
@@ -83,6 +87,7 @@ program
   .description('Start the autonomous orchestrator daemon with live terminal dashboard')
   .option('-c, --config <path>', 'Path to config.json')
   .option('-r, --repo <owner/repo>', 'Target GitHub repository (e.g. owner/repo)')
+  .option('--issue-repo <owner/repo>', 'Repository issues are sourced from, if different from --repo')
   .option('-s, --spec <specs...>', 'Scope execution strictly to child tickets of specific Spec issue(s)', parseSpecsOption)
   .option('--specs <specs...>', 'Alias for --spec', parseSpecsOption)
   .option('-m, --concurrency <number>', 'Maximum parallel tasks', parseInt)
@@ -94,6 +99,7 @@ program
     try {
       const config = await loadConfig(options.config);
       if (options.repo) config.repository = options.repo;
+      if (options.issueRepo) config.issueRepository = options.issueRepo;
       const specOptions = [...(options.spec || []), ...(options.specs || [])];
       if (specOptions.length > 0) {
         config.targetSpecs = Array.from(new Set(specOptions));
@@ -161,7 +167,7 @@ program
         await tui.waitUntilExit();
         await shutdown();
       } else {
-        console.log(pc.cyan(`Starting Imagos for ${config.repository} (headless mode)...`));
+        console.log(pc.cyan(`Starting Imagos for ${formatRepoLabel(config)} (headless mode)...`));
         let isShuttingDown = false;
         const shutdown = async (signal?: string) => {
           if (isShuttingDown) return;
@@ -191,6 +197,7 @@ program
   .command('init')
   .description('Initialize .autopilot/config.json for the current project')
   .option('-r, --repo <owner/repo>', 'GitHub repository')
+  .option('--issue-repo <owner/repo>', 'Repository issues are sourced from, if different from --repo')
   .option('--runner <runner>', 'Default runner to configure (e.g. claude, agy)')
   .option('--telegram', 'Enable Telegram integration')
   .option('--no-telegram', 'Disable Telegram integration')
@@ -205,6 +212,7 @@ program
     try {
       const detectedRepo = options.repo || (await detectRepository());
 
+      let issueRepository: string | undefined = options.issueRepo;
       let selectedRunner = options.runner;
       let remoteEnabled = options.remote ?? options.telegram ?? false;
       let botToken = options.botToken ?? options.telegramToken;
@@ -288,10 +296,27 @@ program
             }
           }
         }
+
+        if (!issueRepository && process.stdin.isTTY) {
+          const promptRl = getRl();
+          if (promptRl) {
+            const codeRepo = detectedRepo || 'this repository';
+            console.log(pc.cyan('\nIssue Tracker:'));
+            console.log(pc.gray('Issues can be sourced from a separate repository; code and pull requests stay in this one.'));
+            const answer = await promptRl.question(
+              pc.yellow(`Repository to source issues from [owner/repo] (default: ${codeRepo}): `)
+            );
+            issueRepository = answer.trim() || undefined;
+          }
+        }
       } finally {
         if (rl) {
           rl.close();
         }
+      }
+
+      if (issueRepository && !REPOSITORY_PATTERN.test(issueRepository)) {
+        throw new Error(`Issue repository must be in "owner/repo" format, got "${issueRepository}"`);
       }
 
       const runner = selectedRunner || 'claude';
@@ -312,9 +337,12 @@ program
         console.log(pc.green(`✓ Saved Telegram credentials to ${savedCredsPath}`));
       }
 
+      const externalIssueRepo = getExternalIssueRepository({ repository: detectedRepo, issueRepository });
+
       const config: Record<string, any> = {
         $schema: 'https://raw.githubusercontent.com/arleypadua/imagos/main/schema.json',
         repository: detectedRepo || 'owner/repo',
+        ...(externalIssueRepo ? { issueRepository: externalIssueRepo } : {}),
         baseBranch: 'main',
         maxConcurrency: 2,
         pollIntervalSeconds: 30,
@@ -361,6 +389,9 @@ program
 
       const savedPath = saveConfig(config as any);
       console.log(pc.green(`\n✓ Created ${savedPath}`));
+      if (externalIssueRepo) {
+        console.log(pc.green(`✓ Configured issue repository: ${pc.bold(externalIssueRepo)}`));
+      }
       console.log(pc.green(`✓ Configured default runner: ${pc.bold(runner)}`));
       if (selectedBotHandle) {
         console.log(pc.green(`✓ Configured Telegram bot handle: ${pc.bold(selectedBotHandle)}`));
@@ -379,12 +410,14 @@ program
   .description('Display runtime metadata, active task sessions, worktrees, and DAG')
   .option('-c, --config <path>', 'Path to config.json')
   .option('-R, --repo <owner/repo>', 'Target GitHub repository (e.g. owner/repo)')
+  .option('--issue-repo <owner/repo>', 'Repository issues are sourced from, if different from --repo')
   .option('-s, --spec <specs...>', 'Scope display strictly to child tickets of specific Spec issue(s)', parseSpecsOption)
   .option('--specs <specs...>', 'Alias for --spec', parseSpecsOption)
   .action(async (options) => {
     try {
       const config = await loadConfig(options.config);
       if (options.repo) config.repository = options.repo;
+      if (options.issueRepo) config.issueRepository = options.issueRepo;
       const specOptions = [...(options.spec || []), ...(options.specs || [])];
       if (specOptions.length > 0) {
         config.targetSpecs = Array.from(new Set(specOptions));
@@ -393,7 +426,7 @@ program
       const stateMgr = new StateManager();
       const runtimeState = stateMgr.getState();
 
-      const gh = new GitHubClient({ repository: config.repository });
+      const gh = new GitHubClient({ repository: getIssueRepository(config) });
       const issues = await gh.fetchIssues();
 
       const dag = new IssueDAG(config);
@@ -403,7 +436,7 @@ program
       const activeWorktrees = await worktreeMgr.listActiveWorktrees();
 
       console.log(pc.bold(pc.cyan(`\n=== AGENT AUTO-PILOT RUNTIME STATE ===\n`)));
-      console.log(`Repository: ${pc.bold(config.repository || 'Local')}`);
+      console.log(`Repository: ${pc.bold(formatRepoLabel(config) || 'Local')}`);
       const targetSpecs = dag.getTargetSpecs();
       if (targetSpecs.length === 1) {
         console.log(`Scoped Spec: ${pc.bold(`#${targetSpecs[0]}`)}`);
@@ -642,6 +675,7 @@ program
   .description('Inspect the issue backlog (ready for agent, waiting on human, blocked by deps, etc.)')
   .option('-c, --config <path>', 'Path to config.json')
   .option('-R, --repo <owner/repo>', 'Target GitHub repository (e.g. owner/repo)')
+  .option('--issue-repo <owner/repo>', 'Repository issues are sourced from, if different from --repo')
   .option('-s, --spec <specs...>', 'Filter backlog strictly to child tickets of specific Spec issue(s)', parseSpecsOption)
   .option('--specs <specs...>', 'Alias for --spec', parseSpecsOption)
   .option('-r, --ready', 'Show only issues ready for agent execution')
@@ -653,12 +687,13 @@ program
     try {
       const config = await loadConfig(options.config);
       if (options.repo) config.repository = options.repo;
+      if (options.issueRepo) config.issueRepository = options.issueRepo;
       const specOptions = [...(options.spec || []), ...(options.specs || [])];
       if (specOptions.length > 0) {
         config.targetSpecs = Array.from(new Set(specOptions));
         delete config.targetSpec;
       }
-      const gh = new GitHubClient({ repository: config.repository });
+      const gh = new GitHubClient({ repository: getIssueRepository(config) });
       const issues = await gh.fetchIssues();
 
       const dag = new IssueDAG(config);
@@ -705,7 +740,7 @@ program
         return;
       }
 
-      console.log(pc.bold(pc.cyan(`\n=== ISSUE BACKLOG & QUEUE: ${config.repository || 'Local'} ===\n`)));
+      console.log(pc.bold(pc.cyan(`\n=== ISSUE BACKLOG & QUEUE: ${getIssueRepository(config) || 'Local'} ===\n`)));
 
       // 1. HUMAN ACTION REQUIRED (TASKS & FEEDBACK)
       if (!filterActive || options.pending) {

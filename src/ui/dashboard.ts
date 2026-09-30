@@ -4,6 +4,7 @@ import type { AutoPilotConfig, TaskStatus } from '../types/index.js';
 import type { WorktreeInfo } from '../worktree/manager.js';
 import type { QuotaStatus } from '../quota/monitor.js';
 import type { IssueDAG } from '../github/dag.js';
+import { formatRepoLabel } from '../config/schema.js';
 
 export interface ActiveWorker {
   issueNumber: number;
@@ -77,7 +78,8 @@ export class Dashboard {
     } else if (targetSpecs.length > 1) {
       specContext = ` | Scoped Specs: ${targetSpecs.map((s) => `#${s}`).join(', ')}`;
     }
-    const repoContext = this.config.repository ? ` | Repo: ${this.config.repository}` : '';
+    const repoLabel = formatRepoLabel(this.config);
+    const repoContext = repoLabel ? ` | Repo: ${repoLabel}` : '';
 
     // Header Banner
     console.log(

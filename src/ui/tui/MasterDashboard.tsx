@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import type { AutoPilotConfig, TaskStatus } from '../../types/index.js';
 import type { IssueDAG } from '../../github/dag.js';
+import { formatRepoLabel } from '../../config/schema.js';
 import type { QuotaStatus } from '../../quota/monitor.js';
 import { CommandPalette, type CommandResult } from './CommandPalette.js';
 
@@ -51,7 +52,8 @@ export const MasterDashboard: React.FC<MasterDashboardProps> = ({
   } else {
     specContext = ` | Scope: Any Spec (All Tasks)`;
   }
-  const repoContext = config.repository ? ` | Repo: ${config.repository}` : '';
+  const repoLabel = formatRepoLabel(config);
+  const repoContext = repoLabel ? ` | Repo: ${repoLabel}` : '';
 
   const configuredAllowed = config.allowedProviders || config.allowedRunners;
   const isRunnerAllowed = (runnerName: string) => {

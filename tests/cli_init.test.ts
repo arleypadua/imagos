@@ -257,4 +257,61 @@ describe('imagos init CLI command', () => {
       expect(mockCloseFn).toHaveBeenCalled();
     });
   });
+
+  describe('Issue repository', () => {
+    const initArgs = ['node', 'imagos', 'init', '--repo', 'owner/code', '--runner', 'claude', '--no-remote'];
+
+    it('saves --issue-repo when it differs from the code repository', async () => {
+      (process.stdin as any).isTTY = false;
+
+      await program.parseAsync([...initArgs, '--issue-repo', 'org/issue-tracker']);
+
+      const savedConfig = vi.mocked(schemaModule.saveConfig).mock.calls[0][0];
+      expect(savedConfig.issueRepository).toBe('org/issue-tracker');
+    });
+
+    it('omits issueRepository when --issue-repo matches the code repository', async () => {
+      (process.stdin as any).isTTY = false;
+
+      await program.parseAsync([...initArgs, '--issue-repo', 'owner/code']);
+
+      const savedConfig = vi.mocked(schemaModule.saveConfig).mock.calls[0][0];
+      expect(savedConfig).not.toHaveProperty('issueRepository');
+    });
+
+    it('prompts for the issue repository in interactive mode', async () => {
+      (process.stdin as any).isTTY = true;
+      mockQuestionAnswers.push('org/issue-tracker');
+
+      await program.parseAsync(initArgs);
+
+      const savedConfig = vi.mocked(schemaModule.saveConfig).mock.calls[0][0];
+      expect(savedConfig.issueRepository).toBe('org/issue-tracker');
+    });
+
+    it('keeps issues in the code repository when the prompt is left empty', async () => {
+      (process.stdin as any).isTTY = true;
+      mockQuestionAnswers.push('');
+
+      await program.parseAsync(initArgs);
+
+      const savedConfig = vi.mocked(schemaModule.saveConfig).mock.calls[0][0];
+      expect(savedConfig).not.toHaveProperty('issueRepository');
+    });
+
+    it('rejects an issue repository not in owner/repo format without saving anything', async () => {
+      (process.stdin as any).isTTY = true;
+      mockQuestionAnswers.push('issue-tracker');
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as any);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await program.parseAsync(initArgs);
+
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('owner/repo'));
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      expect(schemaModule.saveConfig).not.toHaveBeenCalled();
+      exitSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+  });
 });

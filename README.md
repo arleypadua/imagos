@@ -288,6 +288,7 @@ Running `imagos init` creates `.autopilot/config.json`. You can customize it to 
 ### Configuration Options Explained
 
 - `repository`: The GitHub repository in `owner/repo` format. If omitted, imagos detects it from your git origin remote.
+- `issueRepository`: An optional separate repository to source issues from, in `owner/repo` format (defaults to `repository`). Use it when your issues live in a dedicated tracker repository: imagos reads, labels, comments on and closes issues there, while worktrees, pull requests and merges stay in `repository`. PRs reference issues as `Closes owner/tracker#12`, so the reference is visible in the code repository even when the tracker is private. `imagos init` asks for it (press Enter to keep issues in the code repository), or pass `--issue-repo <owner/repo>` to `init` or `start`.
 - `targetSpecs`: An optional array of parent spec issue numbers to restrict execution to.
 - `baseBranch`: The default target branch for pull requests (defaults to `main`).
 - `maxConcurrency`: Maximum number of parallel tasks to run at the same time (defaults to `2`).

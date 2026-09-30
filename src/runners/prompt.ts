@@ -6,6 +6,21 @@ export interface PromptBuilderOptions {
 }
 
 /**
+ * How a PR body references the issue: `#12`, or `owner/repo#12` when issues live in another repository.
+ */
+export function formatIssueRef(issueNumber: number, issueRepository?: string): string {
+  return issueRepository ? `${issueRepository}#${issueNumber}` : `#${issueNumber}`;
+}
+
+/**
+ * The ` -R owner/repo` flag `gh issue` commands need when issues live in another repository than the
+ * worktree's (where `gh` would otherwise default to the code repository).
+ */
+export function issueRepoFlag(issueRepository?: string): string {
+  return issueRepository ? ` -R ${issueRepository}` : "";
+}
+
+/**
  * Builds the canonical Guidelines & Protocol section for agent execution.
  */
 export function buildGuidelines(
@@ -17,7 +32,10 @@ export function buildGuidelines(
     baseBranch = "main",
     autoMerge = true,
     mergeMethod = "squash",
+    issueRepository,
   } = context;
+  const repoFlag = issueRepoFlag(issueRepository);
+  const issueRef = formatIssueRef(issue.number, issueRepository);
 
   const mergeGuideline = autoMerge
     ? `- Once all tests, review, and CI checks pass, merge the Pull Request (e.g. \`gh pr merge --${mergeMethod} --delete-branch\`) to close the issue.`
@@ -27,18 +45,22 @@ export function buildGuidelines(
     ? `Verify changes with tests and code review (${codeReviewHint}).`
     : `Verify changes with tests and code review.`;
 
+  const issueRepoNote = issueRepository
+    ? `> **Issue tracker**: this task's issue lives in \`${issueRepository}\`, not in this worktree's repository. Always pass \`-R ${issueRepository}\` to \`gh issue\` commands; pull requests are opened in this worktree's repository as usual.\n`
+    : "";
+
   return `### Guidelines & Protocol
-1. **Feedback, Questions & Human Review**: If you encounter blocking ambiguities, require clarification, or decide that manual human review is required before merging:
-   - Post your comment or question: \`gh issue comment ${issue.number} --body "❓ **Agent Question**: <your question/explanation>"\`
-   - Mark for developer feedback: \`gh issue edit ${issue.number} --add-label "ready-for-human" --remove-label "ready-for-agent"\` (or \`--add-label "needs-info"\`).
+${issueRepoNote}1. **Feedback, Questions & Human Review**: If you encounter blocking ambiguities, require clarification, or decide that manual human review is required before merging:
+   - Post your comment or question: \`gh issue comment ${issue.number}${repoFlag} --body "❓ **Agent Question**: <your question/explanation>"\`
+   - Mark for developer feedback: \`gh issue edit ${issue.number}${repoFlag} --add-label "ready-for-human" --remove-label "ready-for-agent"\` (or \`--add-label "needs-info"\`).
    - **Immediately conclude execution and exit.** Do not guess or leave the ticket in an untagged open state.
 2. **Follow-up Subtasks & Triage**: If you identify distinct out-of-scope work or follow-up subtasks:
    - No work can be enqueued to the agent without human consent. Never tag newly created follow-up tasks as \`ready-for-agent\` unless explicitly instructed.
-   - Always create follow-up issues with the \`needs-triage\` label: \`gh issue create --title "<title>" --body "Parent: #${issue.number}\\nBlocked by: #${issue.number}\\n\\n<details>\\n\\n### Proposed Solution & Reasoning\\n<if confident, explain why and detail your concern/reasoning for human review>" --label "needs-triage"\`
+   - Always create follow-up issues with the \`needs-triage\` label: \`gh issue create${repoFlag} --title "<title>" --body "Parent: #${issue.number}\\nBlocked by: #${issue.number}\\n\\n<details>\\n\\n### Proposed Solution & Reasoning\\n<if confident, explain why and detail your concern/reasoning for human review>" --label "needs-triage"\`
 3. **Review, PR, Rebase & Merge**:
    - Review both the task description and any discussion/comments above before implementing (comments may contain triage notes, agent briefs, or follow-up decisions).
    - ${reviewText} If review and tests were already completed in a prior turn, do not repeat them redundantly.
-   - Push your branch and open a Pull Request: \`gh pr create --title "<title>" --body "Closes #${issue.number}\\n\\n<summary>"\`
+   - Push your branch and open a Pull Request: \`gh pr create --title "<title>" --body "Closes ${issueRef}\\n\\n<summary>"\`
    - Rebase onto \`${baseBranch}\` and resolve any conflicts if necessary.
    ${mergeGuideline}`;
 }

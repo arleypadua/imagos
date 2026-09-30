@@ -54,10 +54,16 @@ export const RemoteControlConfigSchema = z
   })
   .default({});
 
+export const REPOSITORY_PATTERN = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/;
+
 export const AutoPilotConfigSchema = z.object({
   repository: z
     .string()
-    .regex(/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/, 'Repository must be in "owner/repo" format')
+    .regex(REPOSITORY_PATTERN, 'Repository must be in "owner/repo" format')
+    .optional(),
+  issueRepository: z
+    .string()
+    .regex(REPOSITORY_PATTERN, 'Issue repository must be in "owner/repo" format')
     .optional(),
   targetSpec: z.union([z.number().int(), z.array(z.number().int())]).optional(),
   targetSpecs: z.array(z.number().int()).optional(),
@@ -139,6 +145,35 @@ export async function detectRepository(cwd: string = process.cwd()): Promise<str
     // Git remote origin may not be configured yet
   }
   return undefined;
+}
+
+/**
+ * The repository issues are sourced from. Defaults to {@link AutoPilotConfig.repository}, the repository
+ * code changes and pull requests land in, unless `issueRepository` points at a separate issue tracker.
+ */
+export function getIssueRepository(config: Pick<AutoPilotConfig, 'repository' | 'issueRepository'>): string | undefined {
+  return config.issueRepository ?? config.repository;
+}
+
+/**
+ * The issue repository when it differs from the code repository, i.e. when issue references and `gh issue`
+ * commands must name it explicitly. `undefined` when issues and code live in the same repository.
+ */
+export function getExternalIssueRepository(
+  config: Pick<AutoPilotConfig, 'repository' | 'issueRepository'>
+): string | undefined {
+  const { issueRepository, repository } = config;
+  if (!issueRepository || issueRepository.toLowerCase() === repository?.toLowerCase()) return undefined;
+  return issueRepository;
+}
+
+/**
+ * Display label for the configured repositories: `owner/code`, or `owner/code ← owner/issues` when issues
+ * are sourced from a separate repository.
+ */
+export function formatRepoLabel(config: Pick<AutoPilotConfig, 'repository' | 'issueRepository'>): string | undefined {
+  const externalIssueRepo = getExternalIssueRepository(config);
+  return externalIssueRepo ? `${config.repository ?? 'local'} ← ${externalIssueRepo}` : config.repository;
 }
 
 export function getConfigPath(cwd: string = process.cwd()): string {

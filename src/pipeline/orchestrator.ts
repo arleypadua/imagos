@@ -16,7 +16,8 @@ import { Dashboard } from "../ui/dashboard.js";
 import { StateManager } from "../state/manager.js";
 import { AgentEventBus } from "../events/bus.js";
 import { resolveTelegramCredentials } from "../config/credentials.js";
-import { saveConfig } from "../config/schema.js";
+import { saveConfig, getIssueRepository, getExternalIssueRepository } from "../config/schema.js";
+import { formatIssueRef, issueRepoFlag } from "../runners/prompt.js";
 import { TelegramRemoteProvider } from "../remote/telegram.js";
 import { RemoteControlManager } from "../remote/manager.js";
 import type {
@@ -34,7 +35,10 @@ import type {
 
 export class Orchestrator implements RemoteActionController {
   private config: AutoPilotConfig;
+  /** Client for the issue repository: fetching, labels, comments, closing. */
   private gh: GitHubClient;
+  /** Client for the code repository: finding and merging PRs. Same instance as `gh` unless issues live elsewhere. */
+  private codeGh: GitHubClient;
   private dag: IssueDAG;
   private worktreeMgr: WorktreeManager;
   private quotaMonitor: QuotaMonitor;
@@ -64,7 +68,10 @@ export class Orchestrator implements RemoteActionController {
 
   constructor(config: AutoPilotConfig) {
     this.config = config;
-    this.gh = new GitHubClient({ repository: config.repository });
+    this.gh = new GitHubClient({ repository: getIssueRepository(config) });
+    this.codeGh = getExternalIssueRepository(config)
+      ? new GitHubClient({ repository: config.repository })
+      : this.gh;
     this.dag = new IssueDAG(config);
     this.worktreeMgr = new WorktreeManager();
     this.quotaMonitor = new QuotaMonitor({
@@ -754,6 +761,7 @@ export class Orchestrator implements RemoteActionController {
           runnerName,
           autoMerge: this.config.autoMerge,
           mergeMethod: this.config.mergeMethod,
+          issueRepository: getExternalIssueRepository(this.config),
         },
         {
           cwd: worktreePath,
@@ -850,18 +858,26 @@ export class Orchestrator implements RemoteActionController {
 
       // Case C: Issue remains open
       if (runnerRes.success || runnerRes.status === "COMPLETED") {
-        const pr = await this.gh.findPRForBranch(branchName);
+        const pr = await this.codeGh.findPRForBranch(branchName);
+
+        // A PR the agent already merged leaves the issue open when its `Closes` reference did not
+        // auto-close it (e.g. an issue in a separate tracker repository), so close it here.
+        const alreadyMerged = pr?.state === "MERGED";
 
         // Attempt automated merge if autoMerge is enabled and a PR was opened
-        if (pr && pr.state === "OPEN" && this.config.autoMerge) {
+        if (pr && (alreadyMerged || (pr.state === "OPEN" && this.config.autoMerge))) {
           try {
-            this.dashboard.log(
-              `Auto-merging PR #${pr.number} for Issue #${issue.number}...`,
-            );
-            await this.gh.mergePR(pr.number, this.config.mergeMethod, true);
+            if (!alreadyMerged) {
+              this.dashboard.log(
+                `Auto-merging PR #${pr.number} for Issue #${issue.number}...`,
+              );
+              await this.codeGh.mergePR(pr.number, this.config.mergeMethod, true);
+            }
             await this.gh.closeIssue(
               issue.number,
-              `Closed via automated merge of PR #${pr.number}`,
+              alreadyMerged
+                ? `Closed after merge of PR ${pr.url}`
+                : `Closed via automated merge of PR ${pr.url}`,
             );
             this.stateMgr.finishTaskSession(issue.number, "completed", {
               prUrl: pr.url,
@@ -888,7 +904,7 @@ export class Orchestrator implements RemoteActionController {
             return;
           } catch (mergeErr: any) {
             this.dashboard.log(
-              `Auto-merge failed for PR #${pr.number}: ${mergeErr.message}. Transitioning to human review.`,
+              `${alreadyMerged ? "Closing issue" : "Auto-merge"} failed for PR #${pr.number}: ${mergeErr.message}. Transitioning to human review.`,
             );
           }
         }
@@ -955,11 +971,11 @@ Finalization steps:
 3. Open a Pull Request if not already opened: \`gh pr create --title "${issue.title.replace(
             /"/g,
             '\\"',
-          )}" --body "Closes #${issue.number}"\`
+          )}" --body "Closes ${formatIssueRef(issue.number, getExternalIssueRepository(this.config))}"\`
 ${autoMergeStep}
 5. If you are blocked or intentionally require human intervention, explain why in an issue comment (\`gh issue comment ${
             issue.number
-          } --body "..."\`) and label the issue \`ready-for-human\`.`;
+          }${issueRepoFlag(getExternalIssueRepository(this.config))} --body "..."\`) and label the issue \`ready-for-human\`.`;
 
           this.stateMgr.recordTaskStage(
             issue.number,
@@ -1034,7 +1050,7 @@ Please inspect the existing worktree to see what was already implemented, avoid 
 5. Open a Pull Request: \`gh pr create --title "${issue.title.replace(
             /"/g,
             '\\"',
-          )}" --body "Closes #${issue.number}"\`
+          )}" --body "Closes ${formatIssueRef(issue.number, getExternalIssueRepository(this.config))}"\`
 ${autoMergeStep}
 6. If blocked or clarification is needed, comment on the issue and label \`ready-for-human\`.`;
 
@@ -1111,7 +1127,7 @@ Please inspect the current worktree and git status, resolve the issue, and conti
 4. Open a Pull Request: \`gh pr create --title "${issue.title.replace(
           /"/g,
           '\\"',
-        )}" --body "Closes #${issue.number}"\`
+        )}" --body "Closes ${formatIssueRef(issue.number, getExternalIssueRepository(this.config))}"\`
 ${autoMergeStep}
 5. If blocked or unable to resolve, explain in an issue comment and label \`ready-for-human\`.`;
 
@@ -1360,15 +1376,22 @@ ${autoMergeStep}
   public async openIssueInBrowser(
     issueNumber: number,
   ): Promise<{ success: boolean; message: string }> {
+    const issueRepo = getIssueRepository(this.config);
     try {
-      await execa("gh", ["issue", "view", String(issueNumber), "--web"]);
+      await execa("gh", [
+        "issue",
+        "view",
+        String(issueNumber),
+        ...(issueRepo ? ["-R", issueRepo] : []),
+        "--web",
+      ]);
       return {
         success: true,
         message: `Opened Issue #${issueNumber} in GitHub web browser`,
       };
     } catch {
-      if (this.config.repository) {
-        const url = `https://github.com/${this.config.repository}/issues/${issueNumber}`;
+      if (issueRepo) {
+        const url = `https://github.com/${issueRepo}/issues/${issueNumber}`;
         try {
           const opener =
             process.platform === "darwin"
