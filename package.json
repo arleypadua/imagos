@@ -1,6 +1,6 @@
 {
   "name": "imagos",
-  "version": "0.7.0",
+  "version": "1.0.0",
   "description": "Autonomous multi-agent GitHub issue orchestrator powered by Claude CLI, git worktrees, DAG scheduling, and 5h rolling quota management",
   "type": "module",
   "main": "./dist/index.js",
