@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useInput, useApp } from 'ink';
+import { useInput, useApp, useStdout } from 'ink';
 import {
   ENQUEUE_EXAMPLES,
   ENQUEUE_SUMMARY,
@@ -8,11 +8,11 @@ import {
   parseEnqueueArgs,
 } from '../../pipeline/enqueue_help.js';
 import { Orchestrator } from '../../pipeline/orchestrator.js';
-import { AgentEventBus, type AgentEvent } from '../../events/bus.js';
+import { AgentEventBus, MAX_EVENT_HISTORY_PER_ISSUE, type AgentEvent } from '../../events/bus.js';
 import { loadHistoricalEvents } from '../../events/history.js';
 import type { TaskStatus } from '../../types/index.js';
 import { MasterDashboard, type WorkerItem } from './MasterDashboard.js';
-import { InspectView } from './InspectView.js';
+import { InspectView, buildInspectLines, clampScrollTop, getInspectViewport } from './InspectView.js';
 import { UsageView } from './UsageView.js';
 import { SpecPickerView, type SpecOption } from './SpecPickerView.js';
 import { ActivityLogView } from './ActivityLogView.js';
@@ -36,6 +36,8 @@ export const App: React.FC<AppProps> = ({ orchestrator, onExit }) => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | undefined>(undefined);
   const [eventsMap, setEventsMap] = useState<Map<number, AgentEvent[]>>(new Map());
+  const [inspectScrollTop, setInspectScrollTop] = useState<number | null>(null);
+  const [inspectExpanded, setInspectExpanded] = useState(false);
   const [tickCount, setTickCount] = useState(0);
   const [isRefreshingUsage, setIsRefreshingUsage] = useState(false);
   const [highlightedSpecIndex, setHighlightedSpecIndex] = useState(0);
@@ -365,7 +367,7 @@ export const App: React.FC<AppProps> = ({ orchestrator, onExit }) => {
         if (!list.some((e) => e.id === event.id)) {
           list.push(event);
         }
-        next.set(event.issueNumber, list.slice(-100));
+        next.set(event.issueNumber, list.slice(-MAX_EVENT_HISTORY_PER_ISSUE));
         return next;
       });
     };
@@ -660,6 +662,21 @@ export const App: React.FC<AppProps> = ({ orchestrator, onExit }) => {
   };
 
   // Keyboard navigation & input handling
+  const { stdout } = useStdout();
+
+  const getInspectEvents = (issueNumber: number): AgentEvent[] => {
+    const events = eventsMap.get(issueNumber) || eventBus.getHistory(issueNumber);
+    return events.length > 0 ? events : loadHistoricalEvents(issueNumber);
+  };
+
+  // Every time a session is opened, start by following its tail.
+  useEffect(() => {
+    if (view === 'inspect') {
+      setInspectScrollTop(null);
+      setInspectExpanded(false);
+    }
+  }, [view, inspectIssueNumber]);
+
   useInput((input, key) => {
     if (view === 'dashboard') {
       const query = commandInput.trim().toLowerCase();
@@ -968,6 +985,33 @@ export const App: React.FC<AppProps> = ({ orchestrator, onExit }) => {
             setStatusMessage(`❌ Error injecting prompt: ${err.message}`);
           });
         }
+        return;
+      }
+
+      if (inspectIssueNumber !== null && (key.upArrow || key.downArrow || key.pageUp || key.pageDown || key.home || key.end)) {
+        const { width, height } = getInspectViewport(stdout?.columns, stdout?.rows);
+        const total = buildInspectLines(getInspectEvents(inspectIssueNumber), width, inspectExpanded).length;
+        const maxTop = Math.max(0, total - height);
+        if (key.end) {
+          setInspectScrollTop(null);
+          return;
+        }
+        if (key.home) {
+          setInspectScrollTop(0);
+          return;
+        }
+        const step = key.pageUp || key.pageDown ? Math.max(1, height - 1) : 1;
+        const delta = key.upArrow || key.pageUp ? -step : step;
+        setInspectScrollTop((prev) => {
+          const next = clampScrollTop(prev, total, height) + delta;
+          // Scrolling back to the bottom resumes following new activity.
+          return next >= maxTop ? null : Math.max(0, next);
+        });
+        return;
+      }
+
+      if (key.tab) {
+        setInspectExpanded((prev) => !prev);
         return;
       }
 
@@ -1557,10 +1601,7 @@ export const App: React.FC<AppProps> = ({ orchestrator, onExit }) => {
       branchName: `issue-${inspectIssueNumber}`,
       status: 'running' as const,
     };
-    let events = eventsMap.get(inspectIssueNumber) || eventBus.getHistory(inspectIssueNumber);
-    if (events.length === 0) {
-      events = loadHistoricalEvents(inspectIssueNumber);
-    }
+    const events = getInspectEvents(inspectIssueNumber);
 
     return (
       <InspectView
@@ -1569,6 +1610,8 @@ export const App: React.FC<AppProps> = ({ orchestrator, onExit }) => {
         inputText={inputText}
         isSubmitting={isSubmitting}
         statusMessage={statusMessage}
+        scrollTop={inspectScrollTop}
+        expanded={inspectExpanded}
       />
     );
   }

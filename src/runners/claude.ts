@@ -8,6 +8,7 @@ import { isBinaryAvailable, buildRunnerPrompt } from './base.js';
 import { SPAWN_DETACHED, reapAgentProcesses, signalProcessGroup, trackProcessGroup } from './process_tree.js';
 import { QuotaMonitor } from '../quota/monitor.js';
 import { AgentEventBus } from '../events/bus.js';
+import { parseClaudeTranscriptEntry } from '../events/claude_transcript.js';
 
 export function findLatestClaudeSessionId(worktreePath: string): string | undefined {
   try {
@@ -386,42 +387,15 @@ export class ClaudeRunner implements AgentRunner {
           for (const line of newLines) {
             try {
               const parsed = JSON.parse(line);
-              if (parsed.type === 'assistant' && parsed.message?.content) {
-                for (const block of parsed.message.content) {
-                  if (block.type === 'tool_use') {
-                    procInfo.isExecutingTool = true;
-                    procInfo.currentTool = block.name;
-                    const inputSummary = block.input ? JSON.stringify(block.input).slice(0, 100) : '';
-                    this.eventBus.emitAgentEvent({
-                      issueNumber,
-                      type: 'tool_start',
-                      summary: `🔧 ${block.name}: ${inputSummary}`,
-                      detail: { name: block.name, input: block.input },
-                    });
-                  } else if (block.type === 'text' && block.text) {
-                    const text = block.text.trim();
-                    if (text) {
-                      this.eventBus.emitAgentEvent({
-                        issueNumber,
-                        type: 'thought',
-                        summary: text,
-                      });
-                    }
-                  }
+              for (const evt of parseClaudeTranscriptEntry(parsed)) {
+                if (evt.type === 'tool_start') {
+                  procInfo.isExecutingTool = true;
+                  procInfo.currentTool = evt.detail?.name;
+                } else if (evt.type === 'tool_end') {
+                  procInfo.isExecutingTool = false;
+                  procInfo.currentTool = undefined;
                 }
-              } else if (parsed.type === 'user' && parsed.message?.content) {
-                for (const block of parsed.message.content) {
-                  if (block.type === 'tool_result') {
-                    procInfo.isExecutingTool = false;
-                    procInfo.currentTool = undefined;
-                    this.eventBus.emitAgentEvent({
-                      issueNumber,
-                      type: 'tool_end',
-                      summary: `✓ Tool result received`,
-                      detail: { toolUseId: block.tool_use_id },
-                    });
-                  }
-                }
+                this.eventBus.emitAgentEvent({ issueNumber, ...evt });
               }
             } catch {}
           }

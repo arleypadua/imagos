@@ -3,6 +3,10 @@ import path from 'node:path';
 import os from 'node:os';
 import type { AgentEvent } from './bus.js';
 import { AgentEventBus } from './bus.js';
+import { parseClaudeTranscriptEntry } from './claude_transcript.js';
+
+// Full session history for the inspect view, bounded so huge sessions stay responsive.
+const MAX_TRANSCRIPT_LINES = 1500;
 import { StateManager } from '../state/manager.js';
 import { WorktreeManager } from '../worktree/manager.js';
 
@@ -41,7 +45,7 @@ export function loadHistoricalEvents(issueNumber: number, worktreePath?: string)
 
           const content = fs.readFileSync(latestJsonl, 'utf8');
           const lines = content.split('\n').filter(Boolean);
-          const recentLines = lines.slice(-40);
+          const recentLines = lines.slice(-MAX_TRANSCRIPT_LINES);
 
           for (const line of recentLines) {
             try {
@@ -50,44 +54,13 @@ export function loadHistoricalEvents(issueNumber: number, worktreePath?: string)
                 ? new Date(parsed.timestamp).toLocaleTimeString()
                 : new Date().toLocaleTimeString();
 
-              if (parsed.type === 'assistant' && parsed.message?.content) {
-                for (const block of parsed.message.content) {
-                  if (block.type === 'tool_use') {
-                    const inputSummary = block.input ? JSON.stringify(block.input).slice(0, 100) : '';
-                    events.push({
-                      id: `hist-${events.length}-${Math.random().toString(36).slice(2, 6)}`,
-                      issueNumber,
-                      type: 'tool_start',
-                      timestamp: timeStr,
-                      summary: `🔧 ${block.name}: ${inputSummary}`,
-                      detail: { name: block.name, input: block.input },
-                    });
-                  } else if (block.type === 'text' && block.text) {
-                    const text = block.text.trim();
-                    if (text) {
-                      events.push({
-                        id: `hist-${events.length}-${Math.random().toString(36).slice(2, 6)}`,
-                        issueNumber,
-                        type: 'thought',
-                        timestamp: timeStr,
-                        summary: text,
-                      });
-                    }
-                  }
-                }
-              } else if (parsed.type === 'user' && parsed.message?.content) {
-                for (const block of parsed.message.content) {
-                  if (block.type === 'tool_result') {
-                    events.push({
-                      id: `hist-${events.length}-${Math.random().toString(36).slice(2, 6)}`,
-                      issueNumber,
-                      type: 'tool_end',
-                      timestamp: timeStr,
-                      summary: `✓ Tool result received`,
-                      detail: { toolUseId: block.tool_use_id },
-                    });
-                  }
-                }
+              for (const evt of parseClaudeTranscriptEntry(parsed)) {
+                events.push({
+                  id: `hist-${events.length}-${Math.random().toString(36).slice(2, 6)}`,
+                  issueNumber,
+                  timestamp: timeStr,
+                  ...evt,
+                });
               }
             } catch {}
           }
@@ -139,7 +112,7 @@ export function loadHistoricalEvents(issueNumber: number, worktreePath?: string)
         if (matchedTranscript) {
           const content = fs.readFileSync(matchedTranscript, 'utf8');
           const lines = content.split('\n').filter(Boolean);
-          const recentLines = lines.slice(-40);
+          const recentLines = lines.slice(-MAX_TRANSCRIPT_LINES);
 
           for (const line of recentLines) {
             try {
@@ -171,7 +144,7 @@ export function loadHistoricalEvents(issueNumber: number, worktreePath?: string)
                     issueNumber,
                     type: 'thought',
                     timestamp: timeStr,
-                    summary: thought.slice(0, 160),
+                    summary: thought,
                   });
                 }
               } else if (parsed.type === 'GENERIC' || (parsed.source === 'MODEL' && parsed.content)) {
@@ -183,6 +156,7 @@ export function loadHistoricalEvents(issueNumber: number, worktreePath?: string)
                     type: 'tool_end',
                     timestamp: timeStr,
                     summary: `✓ ${firstLine.slice(0, 80)}`,
+                    detail: { content: parsed.content },
                   });
                 }
               }
@@ -209,7 +183,7 @@ export function loadHistoricalEvents(issueNumber: number, worktreePath?: string)
     }
 
     if (session.stdout) {
-      const stdoutLines = session.stdout.split('\n').filter((l) => l.trim().length > 0).slice(-15);
+      const stdoutLines = session.stdout.split('\n').filter((l) => l.trim().length > 0).slice(-MAX_TRANSCRIPT_LINES);
       for (const line of stdoutLines) {
         events.push({
           id: `hist-stdout-${events.length}`,

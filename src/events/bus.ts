@@ -20,10 +20,13 @@ export interface AgentEvent {
   detail?: any;
 }
 
+// Enough to hold a full agent session for the inspect view while staying bounded.
+export const MAX_EVENT_HISTORY_PER_ISSUE = 2000;
+
 export class AgentEventBus extends EventEmitter {
   private static instance?: AgentEventBus;
   private eventHistory: Map<number, AgentEvent[]> = new Map();
-  private maxHistoryPerIssue = 200;
+  private maxHistoryPerIssue = MAX_EVENT_HISTORY_PER_ISSUE;
 
   public static getInstance(): AgentEventBus {
     if (!AgentEventBus.instance) {
