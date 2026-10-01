@@ -287,6 +287,13 @@ export class Orchestrator implements RemoteActionController {
       );
     }
 
+    const orphans = await this.worktreeMgr.killOrphanedProcesses();
+    if (orphans.length > 0) {
+      this.dashboard.log(
+        `Killed ${orphans.length} orphaned process(es) left in worktrees: ${orphans.join(", ")}`,
+      );
+    }
+
     // Check GitHub Auth
     const isAuthed = await this.gh.checkAuth();
     if (!isAuthed) {

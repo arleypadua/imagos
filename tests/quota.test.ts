@@ -406,13 +406,13 @@ describe('QuotaMonitor', () => {
       monitor.registerPid(4522, 'claude');
 
       monitor.triggerQuotaPause(new Date(Date.now() + 60 * 60 * 1000), 'Session limit', 'claude');
-      expect(kill).toHaveBeenCalledWith(4522, 'SIGSTOP');
+      expect(kill).toHaveBeenCalledWith(-4522, 'SIGSTOP');
 
       // The scheduled resume never runs: the clock passes the reset with the timer lost
       vi.setSystemTime(Date.now() + 2 * 60 * 60 * 1000);
       await monitor.fetchLiveUsage();
 
-      expect(kill).toHaveBeenCalledWith(4522, 'SIGCONT');
+      expect(kill).toHaveBeenCalledWith(-4522, 'SIGCONT');
       expect(monitor.isRunnerPaused('claude')).toBe(false);
     });
 
@@ -428,11 +428,11 @@ describe('QuotaMonitor', () => {
       expect(() =>
         monitor.triggerQuotaPause(new Date(Date.now() + 60 * 1000), 'Session limit', 'claude')
       ).toThrow('notifier blew up');
-      expect(kill).toHaveBeenCalledWith(4509, 'SIGSTOP');
+      expect(kill).toHaveBeenCalledWith(-4509, 'SIGSTOP');
 
       vi.advanceTimersByTime(4 * 60 * 1000);
 
-      expect(kill).toHaveBeenCalledWith(4509, 'SIGCONT');
+      expect(kill).toHaveBeenCalledWith(-4509, 'SIGCONT');
       expect(monitor.isRunnerPaused('claude')).toBe(false);
     });
 

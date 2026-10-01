@@ -5,6 +5,7 @@ import { execa } from 'execa';
 import type { RunnerResult, TaskContext } from '../types/index.js';
 import type { AgentRunner, RunnerOptions } from './base.js';
 import { isBinaryAvailable, buildRunnerPrompt } from './base.js';
+import { SPAWN_DETACHED, reapAgentProcesses, signalProcessGroup, trackProcessGroup } from './process_tree.js';
 import { QuotaMonitor } from '../quota/monitor.js';
 import { AgentEventBus } from '../events/bus.js';
 
@@ -103,9 +104,11 @@ export class ClaudeRunner implements AgentRunner {
   public async stop(issueNumber: number): Promise<void> {
     const active = this.activeProcesses.get(issueNumber);
     if (active) {
-      try {
-        active.subprocess.kill('SIGTERM');
-      } catch {}
+      // run() escalates to SIGKILL and sweeps the worktree once the agent has exited
+      if (active.subprocess.pid) {
+        signalProcessGroup(active.subprocess.pid, 'SIGTERM');
+        signalProcessGroup(active.subprocess.pid, 'SIGCONT');
+      }
       this.cleanupProcess(issueNumber);
     }
   }
@@ -113,10 +116,7 @@ export class ClaudeRunner implements AgentRunner {
   public pause(issueNumber: number): boolean {
     const active = this.activeProcesses.get(issueNumber);
     if (active && active.subprocess.pid) {
-      try {
-        process.kill(active.subprocess.pid, 'SIGSTOP');
-        return true;
-      } catch {}
+      return signalProcessGroup(active.subprocess.pid, 'SIGSTOP');
     }
     return false;
   }
@@ -124,10 +124,7 @@ export class ClaudeRunner implements AgentRunner {
   public resume(issueNumber: number): boolean {
     const active = this.activeProcesses.get(issueNumber);
     if (active && active.subprocess.pid) {
-      try {
-        process.kill(active.subprocess.pid, 'SIGCONT');
-        return true;
-      } catch {}
+      return signalProcessGroup(active.subprocess.pid, 'SIGCONT');
     }
     return false;
   }
@@ -159,11 +156,13 @@ export class ClaudeRunner implements AgentRunner {
 
     let fullOutput = '';
     const issueNumber = options.issueNumber;
+    let pid: number | undefined;
 
     try {
       const subprocess = execa('claude', args, {
         cwd: options.cwd,
         stdin: 'ignore',
+        detached: SPAWN_DETACHED,
         env: {
           ...process.env,
           CI: 'true',
@@ -179,6 +178,9 @@ export class ClaudeRunner implements AgentRunner {
       // Start watching Claude's project JSONL for real-time tool calls & thoughts
       procInfo.watcher = this.startClaudeWatcher(options.cwd, issueNumber, procInfo);
       this.activeProcesses.set(issueNumber, procInfo);
+
+      pid = subprocess.pid;
+      if (pid) trackProcessGroup(pid);
 
       if (subprocess.pid && options.onPid) {
         options.onPid(subprocess.pid);
@@ -241,10 +243,6 @@ export class ClaudeRunner implements AgentRunner {
 
       const pendingPrompt = procInfo.pendingPrompt;
       this.cleanupProcess(issueNumber);
-
-      if (subprocess.pid && this.quotaMonitor) {
-        this.quotaMonitor.unregisterPid(subprocess.pid);
-      }
 
       // Check if prompt was injected while running
       if (pendingPrompt) {
@@ -337,6 +335,11 @@ export class ClaudeRunner implements AgentRunner {
         error: err.message || String(err),
         summary: fullOutput.slice(-1000),
       };
+    } finally {
+      if (pid && this.quotaMonitor) {
+        this.quotaMonitor.unregisterPid(pid);
+      }
+      await reapAgentProcesses(pid, options.cwd);
     }
   }
 

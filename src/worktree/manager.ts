@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execa } from 'execa';
+import { killOrphansInDir } from '../runners/process_tree.js';
 
 export interface WorktreeInfo {
   path: string;
@@ -222,6 +223,7 @@ export class WorktreeManager {
     const branchName = title ? this.getBranchName(issueNumber, title) : undefined;
 
     if (fs.existsSync(worktreePath)) {
+      await killOrphansInDir(worktreePath);
       try {
         await execa('git', ['worktree', 'remove', '--force', worktreePath], { cwd: this.baseDir });
       } catch {
@@ -256,6 +258,12 @@ export class WorktreeManager {
         // Branch deletion failure is non-fatal
       }
     }
+  }
+
+  // Leftovers from agents of a previous daemon that died without reaping them (crash, kill -9).
+  public async killOrphanedProcesses(): Promise<number[]> {
+    if (!fs.existsSync(this.worktreesRoot)) return [];
+    return killOrphansInDir(this.worktreesRoot);
   }
 
   public async listActiveWorktrees(): Promise<WorktreeInfo[]> {

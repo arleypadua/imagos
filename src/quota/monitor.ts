@@ -11,6 +11,7 @@ import {
 } from './types.js';
 import { ClaudeUsageProvider } from './providers/claude.js';
 import { AgyUsageProvider } from './providers/agy.js';
+import { signalProcessGroup } from '../runners/process_tree.js';
 
 export * from './types.js';
 export { ClaudeUsageProvider } from './providers/claude.js';
@@ -250,11 +251,7 @@ export class QuotaMonitor extends EventEmitter {
       if (runner && this.isRunnerPaused(runner)) {
         continue;
       }
-      try {
-        process.kill(pid, 'SIGCONT');
-      } catch {
-        // Process might have terminated
-      }
+      signalProcessGroup(pid, 'SIGCONT');
       this.stoppedPids.delete(pid);
     }
   }
@@ -303,15 +300,10 @@ export class QuotaMonitor extends EventEmitter {
     this.resetAt = effectiveResetAt;
     this.pauseReason = reason;
 
-    // Send SIGSTOP only to active child PIDs of the paused runner
+    // Freeze the paused runner's agents together with the tool processes in their groups
     for (const [pid, runner] of this.activePids.entries()) {
-      if (runner === rName) {
-        try {
-          process.kill(pid, 'SIGSTOP');
-          this.stoppedPids.add(pid);
-        } catch {
-          // Process may have already exited
-        }
+      if (runner === rName && signalProcessGroup(pid, 'SIGSTOP')) {
+        this.stoppedPids.add(pid);
       }
     }
 
@@ -369,14 +361,10 @@ export class QuotaMonitor extends EventEmitter {
       }
     }
 
-    // Send SIGCONT to resume frozen child PIDs of this runner
+    // Resume this runner's frozen agents and their tool processes
     for (const [pid, runner] of this.activePids.entries()) {
       if (!targetRunner || runner === targetRunner) {
-        try {
-          process.kill(pid, 'SIGCONT');
-        } catch {
-          // Process might have terminated
-        }
+        signalProcessGroup(pid, 'SIGCONT');
         this.stoppedPids.delete(pid);
       }
     }
