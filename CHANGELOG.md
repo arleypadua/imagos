@@ -1,5 +1,64 @@
 # imagos
 
+## 1.0.0
+
+### Major Changes
+
+- dae9f7e: fix: read issue relationships only from GitHub's native fields
+
+  The body parser inferred blockers, parents and subtasks from markdown. It had no
+  notion of direction, so any line pairing a phrase like "depends on" with an issue
+  reference became a blocker — including prose that said the _other_ issue depended
+  on this one. A spec inheriting that phantom blocker propagated it to every child
+  through the parent chain, and the whole tree read as blocked.
+
+  `blockedBy`, `parent` and `subIssues` now come from GitHub's native issue
+  relationships alone. Repositories that declared relationships in issue bodies must
+  convert them to native dependencies and sub-issues.
+
+### Minor Changes
+
+- e0e4503: The terminal live tail / session history view now shows the whole agent session instead of the last 14 truncated lines. Messages are shown in full with light markdown formatting, tool calls are pretty-printed (Bash commands, Edit/Write diffs, todo lists), and tool results show a preview that Tab expands. Scroll with ↑/↓, PgUp/PgDn and Home/End; scrolling back to the bottom resumes following new activity.
+- dae9f7e: perf(github): sync issues incrementally to stay inside the GitHub GraphQL rate limit
+
+  - **Incremental polling**: `fetchIssues` caches issues per repository. After the first full read, each poll only asks for issues updated since the previous one (a 1-point GraphQL page) and merges them in, instead of re-reading the whole repository every tick (~50 points per poll on a ~1000-issue repo, which exhausted the 5,000 points/hour budget at the default 30s interval).
+  - **Periodic full sync**: every 15 minutes (`fullSyncIntervalMs`) the whole repository is re-read, catching edits that don't bump `updatedAt` and dropping deleted/transferred issues.
+  - **Rate-limit backoff**: on a rate-limit error the client stops calling GraphQL until the limit resets (read from the free `rate_limit` endpoint) and serves cached issues meanwhile. It no longer falls back to `gh issue list`, which also runs on GraphQL, and a rate-limited first tick no longer aborts `imagos start`.
+
+- e78a0bf: Agents now run in their own process group, and everything they started is killed when each agent round ends, so dev servers, watchers and background jobs no longer pile up across tasks. Processes that left the group but still run inside a worktree are swept when the worktree is removed and on daemon startup. Quota pauses and manual pause/resume now freeze and continue an agent's tool processes along with the agent.
+- 629d97d: Add `issueRepository` config (asked by `imagos init`, or via the `--issue-repo` flag) to source issues from a separate tracker repository while worktrees, pull requests and merges stay in the code repository. Agent prompts pass `-R <issue repo>` to `gh issue` commands and use `Closes owner/repo#N`, and an issue left open after its PR was merged is now closed explicitly.
+- dae9f7e: feat(remote): replace the Telegram issue tree browser with a simple paginated issue list
+
+  - **Flat issue list**: `/browse` (and its `/issues`, `/tree`, `/browse-issues` aliases) now renders open issues as `#number title` with a link to the issue on GitHub, 10 per page.
+  - **Priority order**: the list is ordered by the same criteria that decide dispatch order (`PRIORITY_CRITERIA`), via a new `IssueDAG.getOpenNodesByPriority()` — so what you read at the top of `/browse` is what the scheduler would pick up next.
+  - **Pagination**: Previous/Next buttons page through the list in place; `/browse <page>` jumps straight to a page and out-of-range pages clamp to the first/last.
+  - **Removed**: spec drill-down, the open-only filter toggle, per-issue and bulk enqueue buttons, and the `v1:b:r`/`v1:b:s`/`v1:b:t`/`v1:b:ea` callbacks, all replaced by a single `v1:b:p:<page>` callback. The TUI issue browser is unchanged.
+
+- 9b30b84: feat: add triage backlog section under Issue DAG Queue
+
+  - **Issue DAG Queue Triage Section**: Added a dedicated `📋 Needs Triage:` section in the Master Dashboard TUI and CLI table overview to view untriaged open issues (`needs-triage`).
+  - **Interactive Backlog Drill-down**: Enabled selecting and inspecting the triage backlog in the interactive Category Issues View (press Enter on Needs Triage row), displaying the `📋 needs triage` status badge and supporting actions to enqueue, inspect, or open issues in browser.
+  - **DAG Triage Queries**: Added `getTriageNodes()` to `IssueDAG` returning open un-triaged tasks and respecting spec scope.
+
+### Patch Changes
+
+- dae9f7e: fix(quota): stop a quota pause from freezing runners past its own reset window
+
+  A pause taken on a reset time that has already passed left every runner of that provider SIGSTOPped with
+  nothing scheduled to wake them: the resume was a 1s no-op timer, the entry stayed in `pausedRunners`, and
+  `/status` reported `Paused until <a time in the past>` while the daemon believed it was healthy.
+
+  - `triggerQuotaPause()` now refuses a reset that is already in the past instead of stopping the runners for
+    a window they are no longer inside.
+  - The resume timer is scheduled before `quota_paused` is emitted, so a listener that throws can no longer
+    leave runners stopped with no wake-up on the clock.
+  - `fetchLiveUsage()` reconciles on every poll: any process the monitor stopped whose runner is no longer
+    paused gets a SIGCONT, so a lost resume self-heals within one tick.
+  - `getStatus()` prunes expired pauses, so the TUI and the Telegram `/status` stop reporting a pause that
+    has already lapsed.
+  - Reset strings parse a just-passed clock time as the window that rolled rather than the same time
+    tomorrow, which is what turned a poll two minutes after a 5h boundary into a day-long pause.
+
 ## 0.7.0
 
 ### Minor Changes
