@@ -3,7 +3,7 @@ import pc from 'picocolors';
 import type { AutoPilotConfig, TaskStatus } from '../types/index.js';
 import type { WorktreeInfo } from '../worktree/manager.js';
 import type { QuotaStatus } from '../quota/monitor.js';
-import type { IssueDAG } from '../github/dag.js';
+import { formatNodeBlockers, type IssueDAG } from '../github/dag.js';
 import { formatRepoLabel } from '../config/schema.js';
 
 export interface ActiveWorker {
@@ -256,7 +256,7 @@ export class Dashboard {
       [
         pc.gray('Blocked by Deps'),
         blocked.length.toString(),
-        blocked.map((n) => `#${n.issue.number} (blocked by ${n.blockers.join(', ')})`).join(', ') || pc.gray('None'),
+        blocked.map((n) => `#${n.issue.number} (blocked by ${formatNodeBlockers(n).join(', ')})`).join(', ') || pc.gray('None'),
       ],
       [
         pc.magenta('Needs Triage'),

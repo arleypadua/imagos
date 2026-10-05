@@ -1,6 +1,6 @@
 import { execa } from 'execa';
 import { ActivityLogger } from '../logger/index.js';
-import type { GitHubIssue } from '../types/index.js';
+import type { GitHubIssue, NativeIssueRelation } from '../types/index.js';
 
 const MAX_ISSUE_PAGES = 20;
 const FULL_PAGE_SIZE = 100;
@@ -27,6 +27,15 @@ export function isRateLimitError(err: unknown): boolean {
   return /rate limit|RATE_LIMIT/i.test(text);
 }
 
+function mapGraphQLRelation(node: any): NativeIssueRelation {
+  return {
+    number: node.number,
+    title: node.title,
+    state: node.state,
+    repository: node.repository?.nameWithOwner,
+  };
+}
+
 function mapGraphQLIssue(node: any): GitHubIssue {
   return {
     number: node.number,
@@ -41,22 +50,13 @@ function mapGraphQLIssue(node: any): GitHubIssue {
       color: l.color,
       description: l.description,
     })),
-    parent: node.parent ? { number: node.parent.number, title: node.parent.title } : undefined,
-    blockedBy: (node.blockedBy?.nodes || []).map((b: any) => ({
-      number: b.number,
-      title: b.title,
-      state: b.state,
-    })),
-    blocking: (node.blocking?.nodes || []).map((b: any) => ({
-      number: b.number,
-      title: b.title,
-      state: b.state,
-    })),
-    subIssues: (node.subIssues?.nodes || []).map((s: any) => ({
-      number: s.number,
-      title: s.title,
-      state: s.state,
-    })),
+    repository: node.repository?.nameWithOwner,
+    parent: node.parent
+      ? { number: node.parent.number, title: node.parent.title, repository: node.parent.repository?.nameWithOwner }
+      : undefined,
+    blockedBy: (node.blockedBy?.nodes || []).map(mapGraphQLRelation),
+    blocking: (node.blocking?.nodes || []).map(mapGraphQLRelation),
+    subIssues: (node.subIssues?.nodes || []).map(mapGraphQLRelation),
     comments: (node.comments?.nodes || []).map((c: any) => ({
       id: c.id,
       author: {
@@ -258,15 +258,24 @@ export class GitHubClient {
                   description
                 }
               }
+              repository {
+                nameWithOwner
+              }
               parent {
                 number
                 title
+                repository {
+                  nameWithOwner
+                }
               }
               blockedBy(first: 50) {
                 nodes {
                   number
                   title
                   state
+                  repository {
+                    nameWithOwner
+                  }
                 }
               }
               blocking(first: 50) {
@@ -274,6 +283,9 @@ export class GitHubClient {
                   number
                   title
                   state
+                  repository {
+                    nameWithOwner
+                  }
                 }
               }
               subIssues(first: 100) {
@@ -281,6 +293,9 @@ export class GitHubClient {
                   number
                   title
                   state
+                  repository {
+                    nameWithOwner
+                  }
                 }
               }
               comments(first: 50) {

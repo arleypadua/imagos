@@ -1,6 +1,23 @@
-import type { AutoPilotConfig, DAGNode, GitHubIssue, TaskStatus } from '../types/index.js';
+import type { AutoPilotConfig, DAGNode, ExternalBlocker, GitHubIssue, TaskStatus } from '../types/index.js';
 import { parseIssueDependencies } from './parser.js';
 import { createPriorityContext, sortByPriority } from './priority.js';
+
+/**
+ * Whether a blocker in another repository still blocks. It isn't in this repository's issue set,
+ * so its state comes from the relation itself; an unknown state counts as open.
+ */
+export function isExternalBlockerOpen(blocker: ExternalBlocker): boolean {
+  return blocker.state !== 'CLOSED';
+}
+
+export function formatExternalBlocker(blocker: ExternalBlocker): string {
+  return `${blocker.repository}#${blocker.number}`;
+}
+
+/** Every blocker of a node as a display reference, open or not: `#12` locally, `owner/repo#213` across repos. */
+export function formatNodeBlockers(node: DAGNode): string[] {
+  return [...node.blockers.map((id) => `#${id}`), ...node.externalBlockers.map(formatExternalBlocker)];
+}
 
 export class IssueDAG {
   private nodes: Map<number, DAGNode> = new Map();
@@ -53,6 +70,7 @@ export class IssueDAG {
         issue,
         kind: deps.kind,
         blockers: [...deps.blockers],
+        externalBlockers: [...deps.externalBlockers],
         dependents: [],
         parentNumber: deps.parentNumber,
         children: [...deps.subTaskNumbers],
@@ -94,8 +112,9 @@ export class IssueDAG {
     }
 
     // Propagate blockers from parent spec hierarchy down to child nodes
-    const getAncestorBlockers = (startNode: DAGNode): number[] => {
+    const getAncestorBlockers = (startNode: DAGNode): { local: number[]; external: ExternalBlocker[] } => {
       const inheritedBlockers = new Set<number>();
+      const inheritedExternal: ExternalBlocker[] = [];
       const visited = new Set<number>([startNode.issue.number]);
       let currentParentNumber = startNode.parentNumber;
 
@@ -109,18 +128,25 @@ export class IssueDAG {
             inheritedBlockers.add(bId);
           }
         }
+        inheritedExternal.push(...parentNode.externalBlockers);
 
         currentParentNumber = parentNode.parentNumber;
       }
 
-      return Array.from(inheritedBlockers);
+      return { local: Array.from(inheritedBlockers), external: inheritedExternal };
     };
 
     for (const node of this.nodes.values()) {
       const inherited = getAncestorBlockers(node);
-      for (const bId of inherited) {
+      for (const bId of inherited.local) {
         if (!node.blockers.includes(bId)) {
           node.blockers.push(bId);
+        }
+      }
+      for (const blocker of inherited.external) {
+        const ref = formatExternalBlocker(blocker);
+        if (!node.externalBlockers.some((b) => formatExternalBlocker(b) === ref)) {
+          node.externalBlockers.push(blocker);
         }
       }
     }
@@ -180,6 +206,9 @@ export class IssueDAG {
       if (!blockerIssue || blockerIssue.state === 'OPEN') {
         return 'blocked';
       }
+    }
+    if (node.externalBlockers.some(isExternalBlockerOpen)) {
+      return 'blocked';
     }
 
     return 'ready';
@@ -394,6 +423,23 @@ export class IssueDAG {
       }
     }
     return unresolved;
+  }
+
+  public getUnresolvedExternalBlockers(issueNumber: number): ExternalBlocker[] {
+    const node = this.nodes.get(issueNumber);
+    if (!node) return [];
+    return node.externalBlockers.filter(isExternalBlockerOpen);
+  }
+
+  /**
+   * Every open blocker of an issue as a display reference: `#12` for this repository's issues,
+   * `owner/repo#213` for another repository's.
+   */
+  public getUnresolvedBlockerRefs(issueNumber: number): string[] {
+    return [
+      ...this.getUnresolvedBlockers(issueNumber).map((id) => `#${id}`),
+      ...this.getUnresolvedExternalBlockers(issueNumber).map(formatExternalBlocker),
+    ];
   }
 
   public updateRunnerConfig(config: Partial<AutoPilotConfig>): void {

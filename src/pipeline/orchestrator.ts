@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { execa } from "execa";
 import type { AutoPilotConfig, DAGNode, GitHubIssue, ProviderInfo, EnqueueTaskOptions, EnqueueResult } from "../types/index.js";
 import { GitHubClient, isRateLimitError } from "../github/client.js";
-import { IssueDAG } from "../github/dag.js";
+import { IssueDAG, formatExternalBlocker, formatNodeBlockers, isExternalBlockerOpen } from "../github/dag.js";
 import { WorktreeManager } from "../worktree/manager.js";
 import { QuotaMonitor } from "../quota/monitor.js";
 import {
@@ -1650,11 +1650,17 @@ ${autoMergeStep}
       }
     }
 
-    if (openBlockers.length > 0 && !force) {
+    const openExternalBlockers = node.externalBlockers.filter(isExternalBlockerOpen);
+
+    if ((openBlockers.length > 0 || openExternalBlockers.length > 0) && !force) {
+      const refs = [
+        ...openBlockers.map((b) => `#${b}`),
+        ...openExternalBlockers.map(formatExternalBlocker),
+      ];
       return {
         success: false,
-        message: `Issue #${issueNumber} is blocked by open issue(s): #${openBlockers.join(
-          ", #"
+        message: `Issue #${issueNumber} is blocked by open issue(s): ${refs.join(
+          ", "
         )}. Pass --force to enqueue anyway.`,
         requiresConfirmation: true,
         blockerNumbers: openBlockers,
@@ -1971,8 +1977,8 @@ ${autoMergeStep}
       parts.push(`• Status: \`queued\``);
     }
 
-    if (node && node.blockers.length > 0) {
-      parts.push(`• Blocked by: ${node.blockers.map((b) => `#${b}`).join(", ")}`);
+    if (node && (node.blockers.length > 0 || node.externalBlockers.length > 0)) {
+      parts.push(`• Blocked by: ${formatNodeBlockers(node).join(", ")}`);
     }
 
     const worktreePath = this.worktreeMgr.getWorktreePathForIssue(issueNumber);

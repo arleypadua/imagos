@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import type { AutoPilotConfig, TaskStatus } from '../../types/index.js';
-import type { IssueDAG } from '../../github/dag.js';
+import { formatNodeBlockers, type IssueDAG } from '../../github/dag.js';
 import { formatRepoLabel } from '../../config/schema.js';
 import type { QuotaStatus } from '../../quota/monitor.js';
 import { CommandPalette, type CommandResult } from './CommandPalette.js';
@@ -371,7 +371,7 @@ export const MasterDashboard: React.FC<MasterDashboardProps> = ({
             </Text>
           </Box>
           <Text color={selectedIndex === workers.length + 3 ? 'cyan' : 'gray'}>
-            {blockedNodes.map((n) => `#${n.issue.number} (blocked by ${n.blockers.join(', ')})`).join(', ') || 'None'}
+            {blockedNodes.map((n) => `#${n.issue.number} (blocked by ${formatNodeBlockers(n).join(', ')})`).join(', ') || 'None'}
           </Text>
         </Box>
 

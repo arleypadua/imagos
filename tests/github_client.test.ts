@@ -88,6 +88,50 @@ describe('GitHubClient', () => {
       );
     });
 
+    it('should keep the repository of each blocker so cross-repo blockers are not mistaken for local issues', async () => {
+      const response = {
+        data: {
+          repository: {
+            issues: {
+              nodes: [
+                {
+                  number: 68,
+                  title: 'Emulator ticket',
+                  body: '',
+                  state: 'OPEN',
+                  url: 'https://github.com/owner/pkh-emu/issues/68',
+                  createdAt: '2026-08-18T08:30:51Z',
+                  updatedAt: '2026-08-18T14:02:22Z',
+                  repository: { nameWithOwner: 'owner/pkh-emu' },
+                  labels: { nodes: [] },
+                  parent: null,
+                  blockedBy: {
+                    nodes: [
+                      { number: 213, title: 'SDK release', state: 'CLOSED', repository: { nameWithOwner: 'owner/issue-tracker' } },
+                    ],
+                  },
+                  blocking: { nodes: [] },
+                  subIssues: { nodes: [] },
+                },
+              ],
+            },
+          },
+        },
+      };
+
+      mockedExeca.mockResolvedValueOnce({ stdout: JSON.stringify(response) } as any);
+
+      const client = new GitHubClient({ repository: 'owner/pkh-emu' });
+      const issues = await client.fetchIssues();
+
+      expect(issues[0].repository).toBe('owner/pkh-emu');
+      expect(issues[0].blockedBy).toEqual([
+        { number: 213, title: 'SDK release', state: 'CLOSED', repository: 'owner/issue-tracker' },
+      ]);
+      const query = (mockedExeca.mock.calls[0][1] as string[]).find((a) => a.startsWith('query='))!;
+      expect(query).toMatch(/blockedBy\(first: 50\) \{\s*nodes \{[^}]*repository \{\s*nameWithOwner/);
+    });
+
     it('should page through every issue instead of stopping at the first page', async () => {
       const pageOf = (numbers: number[], hasNextPage: boolean, endCursor: string | null) => ({
         data: {

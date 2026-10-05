@@ -25,6 +25,16 @@ export interface NativeIssueRelation {
   number: number;
   title?: string;
   state?: 'OPEN' | 'CLOSED' | string;
+  /** `owner/repo` the related issue lives in; GitHub relations can cross repositories. */
+  repository?: string;
+}
+
+/** A blocker that lives in another repository, so it is not a node of this repository's DAG. */
+export interface ExternalBlocker {
+  repository: string;
+  number: number;
+  title?: string;
+  state?: 'OPEN' | 'CLOSED' | string;
 }
 
 export interface GitHubIssue {
@@ -36,10 +46,12 @@ export interface GitHubIssue {
   url: string;
   createdAt: string;
   updatedAt: string;
+  /** `owner/repo` this issue lives in, when the source reports it. */
+  repository?: string;
   comments?: GitHubComment[];
   blockedBy?: NativeIssueRelation[];
   blocking?: NativeIssueRelation[];
-  parent?: { number: number; title?: string } | null;
+  parent?: { number: number; title?: string; repository?: string } | null;
   subIssues?: NativeIssueRelation[];
 }
 
@@ -47,6 +59,7 @@ export type TaskKind = 'spec' | 'ticket' | 'standalone';
 
 export interface ParsedDependencies {
   blockers: number[];
+  externalBlockers: ExternalBlocker[];
   parentNumber?: number;
   subTaskNumbers: number[];
   kind: TaskKind;
@@ -68,6 +81,8 @@ export interface DAGNode {
   issue: GitHubIssue;
   kind: TaskKind;
   blockers: number[];
+  /** Blockers in other repositories, resolved by the state their relation reported. */
+  externalBlockers: ExternalBlocker[];
   dependents: number[];
   parentNumber?: number;
   children: number[];

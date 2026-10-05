@@ -1066,6 +1066,88 @@ describe('IssueDAG', () => {
   });
 });
 
+describe('IssueDAG cross-repository blockers', () => {
+  const TRACKER = 'owner/pkh-emu';
+  const OTHER = 'owner/issue-tracker';
+  const issue = (number: number, extra: Partial<GitHubIssue> = {}): GitHubIssue => ({
+    number,
+    title: `Issue ${number}`,
+    body: '',
+    state: 'OPEN',
+    labels: [{ name: 'ready-for-agent' }],
+    url: `https://github.com/${TRACKER}/issues/${number}`,
+    createdAt: '2026-08-01T00:00:00Z',
+    updatedAt: '2026-08-01T00:00:00Z',
+    repository: TRACKER,
+    ...extra,
+  });
+
+  it('unblocks an issue whose blocker in another repository is closed, though no local issue has that number', () => {
+    const dag = new IssueDAG(DEFAULT_CONFIG);
+    dag.build([issue(68, { blockedBy: [{ number: 213, state: 'CLOSED', repository: OTHER }] })]);
+
+    expect(dag.getNode(68)?.blockers).toEqual([]);
+    expect(dag.getReadyNodes().map((n) => n.issue.number)).toEqual([68]);
+    expect(dag.getUnresolvedBlockerRefs(68)).toEqual([]);
+  });
+
+  it('keeps an issue blocked while its blocker in another repository is open', () => {
+    const dag = new IssueDAG(DEFAULT_CONFIG);
+    dag.build([issue(68, { blockedBy: [{ number: 213, state: 'OPEN', repository: OTHER }] })]);
+
+    expect(dag.getBlockedNodes().map((n) => n.issue.number)).toEqual([68]);
+    expect(dag.getUnresolvedBlockerRefs(68)).toEqual([`${OTHER}#213`]);
+  });
+
+  it('does not resolve a cross-repository blocker against a local issue with the same number', () => {
+    const dag = new IssueDAG(DEFAULT_CONFIG);
+    dag.build([
+      issue(68, { blockedBy: [{ number: 213, state: 'OPEN', repository: OTHER }] }),
+      issue(213, { state: 'CLOSED' }),
+    ]);
+
+    expect(dag.getNode(68)?.status).toBe('blocked');
+    expect(dag.getNode(213)?.dependents).toEqual([]);
+  });
+
+  it('still resolves a same-repository blocker by its local issue', () => {
+    const dag = new IssueDAG(DEFAULT_CONFIG);
+    dag.build([
+      issue(68, { blockedBy: [{ number: 5, state: 'OPEN', repository: TRACKER }] }),
+      issue(5, { state: 'CLOSED' }),
+    ]);
+
+    expect(dag.getNode(68)?.blockers).toEqual([5]);
+    expect(dag.getNode(68)?.status).toBe('ready');
+  });
+
+  it('propagates an open cross-repository blocker from a spec to its tickets', () => {
+    const dag = new IssueDAG(DEFAULT_CONFIG);
+    dag.build([
+      issue(10, {
+        title: 'Spec: Emulator',
+        subIssues: [{ number: 11, repository: TRACKER }],
+        blockedBy: [{ number: 213, state: 'OPEN', repository: OTHER }],
+      }),
+      issue(11, { parent: { number: 10, repository: TRACKER } }),
+    ]);
+
+    expect(dag.getNode(11)?.status).toBe('blocked');
+    expect(dag.getUnresolvedBlockerRefs(11)).toEqual([`${OTHER}#213`]);
+  });
+
+  it('ignores sub-issues from another repository', () => {
+    const dag = new IssueDAG(DEFAULT_CONFIG);
+    dag.build([
+      issue(10, { subIssues: [{ number: 11, repository: OTHER }] }),
+      issue(11),
+    ]);
+
+    expect(dag.getNode(10)?.children).toEqual([]);
+    expect(dag.getNode(11)?.parentNumber).toBeUndefined();
+  });
+});
+
 describe('parseSpecsOption', () => {
   it('should parse single string number', () => {
     expect(parseSpecsOption('42')).toEqual([42]);

@@ -1,14 +1,28 @@
-import type { GitHubIssue, ParsedDependencies, TaskKind } from '../types/index.js';
+import type { ExternalBlocker, GitHubIssue, ParsedDependencies, TaskKind } from '../types/index.js';
+
+/**
+ * Whether a related issue lives in the same repository as `issue`. Issue numbers are only unique
+ * within a repository, so a cross-repo relation must never be resolved by number against this
+ * repository's issues. When either side doesn't report its repository, it is assumed local.
+ */
+export function isSameRepository(issue: GitHubIssue, related: { repository?: string }): boolean {
+  if (!issue.repository || !related.repository) return true;
+  return issue.repository.toLowerCase() === related.repository.toLowerCase();
+}
 
 export function parseIssueDependencies(issue: GitHubIssue): ParsedDependencies {
   const body = issue.body || '';
   const blockers: Set<number> = new Set();
+  const externalBlockers: ExternalBlocker[] = [];
   const subTaskNumbers: Set<number> = new Set();
-  const parentNumber: number | undefined = issue.parent?.number;
+  const parentNumber: number | undefined =
+    issue.parent && isSameRepository(issue, issue.parent) ? issue.parent.number : undefined;
 
   if (issue.blockedBy) {
     for (const b of issue.blockedBy) {
-      if (b.number !== issue.number) {
+      if (!isSameRepository(issue, b)) {
+        externalBlockers.push({ repository: b.repository!, number: b.number, title: b.title, state: b.state });
+      } else if (b.number !== issue.number) {
         blockers.add(b.number);
       }
     }
@@ -16,7 +30,7 @@ export function parseIssueDependencies(issue: GitHubIssue): ParsedDependencies {
 
   if (issue.subIssues) {
     for (const s of issue.subIssues) {
-      if (s.number !== issue.number) {
+      if (isSameRepository(issue, s) && s.number !== issue.number) {
         subTaskNumbers.add(s.number);
       }
     }
@@ -38,6 +52,7 @@ export function parseIssueDependencies(issue: GitHubIssue): ParsedDependencies {
 
   return {
     blockers: Array.from(blockers),
+    externalBlockers,
     parentNumber,
     subTaskNumbers: Array.from(subTaskNumbers),
     kind,

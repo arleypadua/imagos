@@ -800,7 +800,7 @@ describe('TUI Components', () => {
       getTargetSpecs: () => [],
       getReadyNodes: () => [{ issue: { number: 10 } }],
       getWaitingFeedbackNodes: () => [{ issue: { number: 20 } }],
-      getBlockedNodes: () => [{ issue: { number: 30 }, blockers: [10] }],
+      getBlockedNodes: () => [{ issue: { number: 30 }, blockers: [10], externalBlockers: [] }],
       getTriageNodes: () => [{ issue: { number: 40 } }, { issue: { number: 41 } }],
     };
 

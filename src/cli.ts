@@ -798,11 +798,11 @@ program
             colWidths: [10, 40, 30],
           });
           for (const node of blockedNodes) {
-            const unresolved = dag.getUnresolvedBlockers(node.issue.number);
+            const unresolved = dag.getUnresolvedBlockerRefs(node.issue.number);
             table.push([
               `#${node.issue.number}`,
               node.issue.title.slice(0, 38),
-              unresolved.map((id) => `#${id}`).join(', ') || 'Parent/Blocker Open',
+              unresolved.join(', ') || 'Parent/Blocker Open',
             ]);
           }
           console.log(table.toString());
