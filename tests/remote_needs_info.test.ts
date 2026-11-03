@@ -266,7 +266,7 @@ describe('Remote Needs-Info Steering & Dual-Mode Replies', () => {
     // Verify message was edited/locked on Telegram
     expect(provider.editedMessages.length).toBe(1);
     expect(provider.editedMessages[0].text).toContain('✅ *Answered* (via button): PostgreSQL');
-    expect(provider.editedMessages[0].options?.actions).toEqual([]);
+    expect(provider.editedMessages[0].options?.actions?.flat().some((b) => b.payload.startsWith('v1:inf'))).toBe(false);
 
     // Verify GitHub comment posted
     expect(mockGh.addComment).toHaveBeenCalledWith(
@@ -318,7 +318,7 @@ describe('Remote Needs-Info Steering & Dual-Mode Replies', () => {
     // Verify message was edited/locked on Telegram
     expect(provider.editedMessages.length).toBe(1);
     expect(provider.editedMessages[0].text).toContain('✅ *Answered* (via text): Use /api/v2/metrics');
-    expect(provider.editedMessages[0].options?.actions).toEqual([]);
+    expect(provider.editedMessages[0].options?.actions?.flat().some((b) => b.payload.startsWith('v1:inf'))).toBe(false);
 
     // Verify GitHub comment posted
     expect(mockGh.addComment).toHaveBeenCalledWith(

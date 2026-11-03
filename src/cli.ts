@@ -19,6 +19,9 @@ import {
   formatRepoLabel,
   REPOSITORY_PATTERN,
   loadUserConfig,
+  parseLimitInput,
+  saveQuotaLimits,
+  readQuotaLimits,
   saveTelegramBot,
   parseAllowedChatIds,
   saveTelegramCredentials,
@@ -135,7 +138,9 @@ program
         process.exit(1);
       }
 
-      const orchestrator = new Orchestrator(config);
+      const orchestrator = new Orchestrator(config, {
+        configPath: options.config ? path.resolve(process.cwd(), options.config) : getConfigPath(),
+      });
       const isInteractive = options.interactive !== false && Boolean(process.stdout.isTTY);
 
       if (isInteractive) {
@@ -370,6 +375,7 @@ program
         quota: {
           pauseOnLimit: true,
           utilizationThresholdLimit: 0.85,
+          weeklyThresholdLimit: 0.9,
         },
         labels: {
           readyForAgent: 'ready-for-agent',
@@ -871,7 +877,50 @@ program
     }
   });
 
-// 9. INSTALL-SKILLS COMMAND
+// 9. LIMITS COMMAND
+program
+  .command('limits')
+  .alias('quota')
+  .description('Show or change the usage limits workers pause at; a running daemon picks changes up within seconds')
+  .option('-c, --config <path>', 'Path to config.json')
+  .option('-w, --weekly <percent>', 'Share of the weekly window to use before pausing (e.g. 90, 90%, 0.9)')
+  .option('--5h <percent>', 'Share of the 5h session window to use before pausing (e.g. 85, 85%, 0.85)')
+  .option('--five-hour <percent>', 'Alias for --5h')
+  .action((options) => {
+    try {
+      const configPath = options.config ? path.resolve(process.cwd(), options.config) : getConfigPath();
+      const fiveHourRaw = options['5h'] ?? options.fiveHour;
+      const weeklyRaw = options.weekly;
+
+      if (fiveHourRaw !== undefined || weeklyRaw !== undefined) {
+        const fiveHour = fiveHourRaw !== undefined ? parseLimitInput(fiveHourRaw) : undefined;
+        const weekly = weeklyRaw !== undefined ? parseLimitInput(weeklyRaw) : undefined;
+        if (fiveHourRaw !== undefined && fiveHour === undefined) {
+          throw new Error(`Invalid 5h limit "${fiveHourRaw}": use a percentage between 1 and 100.`);
+        }
+        if (weeklyRaw !== undefined && weekly === undefined) {
+          throw new Error(`Invalid weekly limit "${weeklyRaw}": use a percentage between 1 and 100.`);
+        }
+        saveQuotaLimits({ fiveHour, weekly }, configPath);
+        console.log(pc.green(`✓ Saved limits to ${configPath}`));
+      }
+
+      const limits = readQuotaLimits(configPath);
+      console.log(pc.bold('Usage limits'));
+      console.log(`  5h session: ${pc.cyan(`${Math.round(limits.fiveHour * 100)}%`)}`);
+      console.log(`  Weekly:     ${pc.cyan(`${Math.round(limits.weekly * 100)}%`)}`);
+      if (fiveHourRaw === undefined && weeklyRaw === undefined) {
+        console.log(pc.gray('\nChange with: imagos limits --weekly 90 --5h 85'));
+      } else {
+        console.log(pc.gray('A running daemon applies the new limits within a few seconds.'));
+      }
+    } catch (err: any) {
+      console.error(pc.red(`Limits error: ${err.message}`));
+      process.exit(1);
+    }
+  });
+
+// 10. INSTALL-SKILLS COMMAND
 program
   .command('install-skills')
   .alias('skills')

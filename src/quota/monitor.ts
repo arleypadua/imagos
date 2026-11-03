@@ -1,7 +1,11 @@
 import { EventEmitter } from 'node:events';
 import {
+  DEFAULT_FIVE_HOUR_THRESHOLD,
   DEFAULT_RESET_BUFFER_MS,
+  DEFAULT_WEEKLY_THRESHOLD,
   rollForwardIfStale,
+  toThresholdPercent,
+  type QuotaBucket,
   type ClaudeLiveUsage,
   type QuotaMonitorOptions,
   type QuotaStatus,
@@ -38,7 +42,8 @@ export class QuotaMonitor extends EventEmitter {
     this.options = {
       pauseOnLimit: options.pauseOnLimit ?? true,
       utilizationThresholdLimit:
-        options.utilizationThresholdLimit ?? options.utilizationThreshold ?? 0.85,
+        options.utilizationThresholdLimit ?? options.utilizationThreshold ?? DEFAULT_FIVE_HOUR_THRESHOLD,
+      weeklyThresholdLimit: options.weeklyThresholdLimit ?? DEFAULT_WEEKLY_THRESHOLD,
       allowedProviders: options.allowedProviders,
     };
     this.claudeProvider = new ClaudeUsageProvider();
@@ -55,7 +60,9 @@ export class QuotaMonitor extends EventEmitter {
         options.utilizationThresholdLimit ??
         options.utilizationThreshold ??
         this.options.utilizationThresholdLimit ??
-        0.85,
+        DEFAULT_FIVE_HOUR_THRESHOLD,
+      weeklyThresholdLimit:
+        options.weeklyThresholdLimit ?? this.options.weeklyThresholdLimit ?? DEFAULT_WEEKLY_THRESHOLD,
       allowedProviders:
         options.allowedProviders !== undefined
           ? options.allowedProviders
@@ -65,6 +72,14 @@ export class QuotaMonitor extends EventEmitter {
 
   public getOptions(): QuotaMonitorOptions {
     return { ...this.options };
+  }
+
+  /** The configured limits as whole percentages. */
+  public getThresholds(): { fiveHourPercent: number; weeklyPercent: number } {
+    return {
+      fiveHourPercent: toThresholdPercent(this.options.utilizationThresholdLimit ?? DEFAULT_FIVE_HOUR_THRESHOLD),
+      weeklyPercent: toThresholdPercent(this.options.weeklyThresholdLimit ?? DEFAULT_WEEKLY_THRESHOLD),
+    };
   }
 
   public isRunnerAllowed(runnerName: string): boolean {
@@ -261,7 +276,8 @@ export class QuotaMonitor extends EventEmitter {
     reason: string = 'Quota limit reached',
     runnerName: string = 'claude',
     affectedIssues?: number[],
-    bufferMs: number = DEFAULT_RESET_BUFFER_MS
+    bufferMs: number = DEFAULT_RESET_BUFFER_MS,
+    source: 'threshold' | 'rate_limit' = 'rate_limit'
   ): void {
     const rName = runnerName.toLowerCase();
     if (!this.isRunnerAllowed(rName)) {
@@ -283,6 +299,7 @@ export class QuotaMonitor extends EventEmitter {
         const merged = Array.from(new Set([...(existing.affectedIssues || []), ...affectedIssues]));
         existing.affectedIssues = merged;
       }
+      if (source === 'rate_limit') existing.source = 'rate_limit';
       return;
     }
 
@@ -292,6 +309,7 @@ export class QuotaMonitor extends EventEmitter {
       resetAt: effectiveResetAt,
       reason,
       affectedIssues,
+      source,
     };
     this.pausedRunners.set(rName, pauseInfo);
 
@@ -412,75 +430,81 @@ export class QuotaMonitor extends EventEmitter {
       }
     }
 
-    const rawThreshold = this.options.utilizationThresholdLimit ?? 0.85;
-    const thresholdPercent = rawThreshold <= 1.0 ? Math.round(rawThreshold * 100) : Math.round(rawThreshold);
+    const { fiveHourPercent, weeklyPercent } = this.getThresholds();
     const shouldPauseOnLimit = this.options.pauseOnLimit !== false;
 
     const claudeLive = (await this.claudeProvider.isAvailable()) ? this.claudeProvider.getCachedLiveUsage() : null;
 
-    // Check if Claude quota threshold is reached
+    // Claude: the 5h session window and the weekly window each have their own limit. The session line is
+    // missing whenever the 5h limit is lifted, and the weekly limit is then the only one standing.
     if (this.isRunnerAllowed('claude') && claudeLive && shouldPauseOnLimit) {
-      const isOverLimit = claudeLive.sessionUsedPercentage >= thresholdPercent;
-      if (isOverLimit) {
-        if (!this.isRunnerOverridden('claude')) {
-          const resetAt = claudeLive.sessionResetAt || new Date(Date.now() + 60 * 60 * 1000);
-          if (!this.isRunnerPaused('claude')) {
-            this.triggerQuotaPause(
-              resetAt,
-              `Claude Live Session Quota: ${claudeLive.sessionUsedPercentage}% used (threshold: ${thresholdPercent}%, resets ${claudeLive.sessionResetText || 'soon'})`,
-              'claude'
-            );
-          }
-        }
-      } else {
-        this.overriddenRunners.delete('claude');
-        if (this.isRunnerPaused('claude')) {
-          const pauseInfo = this.pausedRunners.get('claude');
-          const resetPassed = pauseInfo ? Date.now() >= pauseInfo.resetAt.getTime() : true;
-          const newWindowBegan =
-            claudeLive.sessionResetAt && pauseInfo
-              ? claudeLive.sessionResetAt.getTime() > pauseInfo.resetAt.getTime()
-              : false;
-
-          if (resetPassed || newWindowBegan) {
-            this.resumeFromQuota('claude');
-          }
-        }
+      const breaches: Array<{ resetAt: Date; reason: string }> = [];
+      if (claudeLive.sessionUsedPercentage >= fiveHourPercent) {
+        breaches.push({
+          resetAt: claudeLive.sessionResetAt || new Date(Date.now() + 60 * 60 * 1000),
+          reason: `Claude Live Session Quota: ${claudeLive.sessionUsedPercentage}% used (threshold: ${fiveHourPercent}%, resets ${claudeLive.sessionResetText || 'soon'})`,
+        });
       }
+      if (claudeLive.weekUsedPercentage !== undefined && claudeLive.weekUsedPercentage >= weeklyPercent) {
+        breaches.push({
+          resetAt: claudeLive.weekResetAt || new Date(Date.now() + 60 * 60 * 1000),
+          reason: `Claude Weekly Quota: ${claudeLive.weekUsedPercentage}% used (weekly threshold: ${weeklyPercent}%, resets ${claudeLive.weekResetText || 'soon'})`,
+        });
+      }
+      this.applyThresholdBreaches('claude', breaches, claudeLive.sessionResetAt ? [claudeLive.sessionResetAt] : []);
     }
 
-    // Check if AGY quota threshold is reached
+    // AGY: each bucket is held to the limit of its own window.
     const agyUsage = this.runnerUsages.get('agy');
     if (this.isRunnerAllowed('agy') && agyUsage && shouldPauseOnLimit) {
-      const limitingBucket = agyUsage.buckets.find((b) => b.usedPercentage >= thresholdPercent);
-      if (limitingBucket) {
-        if (!this.isRunnerOverridden('agy')) {
-          const resetAt = limitingBucket.resetAt || new Date(Date.now() + 60 * 60 * 1000);
-          if (!this.isRunnerPaused('agy')) {
-            this.triggerQuotaPause(
-              resetAt,
-              `AGY Quota: ${limitingBucket.usedPercentage}% used (threshold: ${thresholdPercent}%) for ${limitingBucket.name}`,
-              'agy'
-            );
-          }
-        }
-      } else {
-        this.overriddenRunners.delete('agy');
-        if (this.isRunnerPaused('agy')) {
-          const pauseInfo = this.pausedRunners.get('agy');
-          const resetPassed = pauseInfo ? Date.now() >= pauseInfo.resetAt.getTime() : true;
-          const newWindowBegan =
-            pauseInfo &&
-            agyUsage.buckets.some((b) => b.resetAt && b.resetAt.getTime() > pauseInfo.resetAt.getTime());
-
-          if (resetPassed || newWindowBegan) {
-            this.resumeFromQuota('agy');
-          }
-        }
-      }
+      const breaches = agyUsage.buckets
+        .filter((b) => b.usedPercentage >= this.thresholdForBucket(b, fiveHourPercent, weeklyPercent))
+        .map((b) => ({
+          resetAt: b.resetAt || new Date(Date.now() + 60 * 60 * 1000),
+          reason: `AGY Quota: ${b.usedPercentage}% used (threshold: ${this.thresholdForBucket(b, fiveHourPercent, weeklyPercent)}%) for ${b.name}`,
+        }));
+      this.applyThresholdBreaches(
+        'agy',
+        breaches,
+        agyUsage.buckets.map((b) => b.resetAt).filter((d): d is Date => Boolean(d))
+      );
     }
 
     return claudeLive;
+  }
+
+  private thresholdForBucket(bucket: QuotaBucket, fiveHourPercent: number, weeklyPercent: number): number {
+    return bucket.windowType === 'weekly' ? weeklyPercent : fiveHourPercent;
+  }
+
+  // Pauses a runner over any of its limits until the latest of those windows resets, or lifts a pause the
+  // limits imposed once the runner is back under all of them.
+  private applyThresholdBreaches(
+    runnerName: string,
+    breaches: Array<{ resetAt: Date; reason: string }>,
+    currentResetTimes: Date[]
+  ): void {
+    if (breaches.length > 0) {
+      if (this.isRunnerOverridden(runnerName) || this.isRunnerPaused(runnerName)) return;
+      const binding = breaches.reduce((a, b) => (b.resetAt.getTime() > a.resetAt.getTime() ? b : a));
+      this.triggerQuotaPause(binding.resetAt, binding.reason, runnerName, undefined, DEFAULT_RESET_BUFFER_MS, 'threshold');
+      return;
+    }
+
+    this.overriddenRunners.delete(runnerName);
+    if (!this.isRunnerPaused(runnerName)) return;
+
+    const pauseInfo = this.pausedRunners.get(runnerName);
+    const resetPassed = pauseInfo ? Date.now() >= pauseInfo.resetAt.getTime() : true;
+    const newWindowBegan = pauseInfo
+      ? currentResetTimes.some((d) => d.getTime() > pauseInfo.resetAt.getTime())
+      : false;
+    // A pause the limits imposed ends as soon as usage is back under them, e.g. after a limit was raised.
+    const liftedByLimits = pauseInfo?.source === 'threshold';
+
+    if (resetPassed || newWindowBegan || liftedByLimits) {
+      this.resumeFromQuota(runnerName);
+    }
   }
 
   public getStatus(): QuotaStatus {

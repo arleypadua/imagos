@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execa } from 'execa';
 import type { AutoPilotConfig } from '../types/index.js';
+import { DEFAULT_FIVE_HOUR_THRESHOLD, DEFAULT_WEEKLY_THRESHOLD } from '../quota/types.js';
 
 export const AgyRunnerConfigSchema = z.object({
   model: z.string().optional(),
@@ -89,15 +90,17 @@ export const AutoPilotConfigSchema = z.object({
       pauseOnLimit: z.boolean().default(true),
       utilizationThresholdLimit: z.number().min(0.01).max(1.0).optional(),
       utilizationThreshold: z.number().min(0.01).max(1.0).optional(),
+      weeklyThresholdLimit: z.number().min(0.01).max(1.0).optional(),
       tokenCeiling: z.number().int().min(10000).optional(),
       proxyPort: z.number().int().optional().default(9876),
     })
     .transform((val) => {
-      const threshold = val.utilizationThresholdLimit ?? val.utilizationThreshold ?? 0.85;
+      const threshold = val.utilizationThresholdLimit ?? val.utilizationThreshold ?? DEFAULT_FIVE_HOUR_THRESHOLD;
       return {
         pauseOnLimit: val.pauseOnLimit,
         utilizationThresholdLimit: threshold,
         utilizationThreshold: threshold,
+        weeklyThresholdLimit: val.weeklyThresholdLimit ?? DEFAULT_WEEKLY_THRESHOLD,
         tokenCeiling: val.tokenCeiling,
         proxyPort: val.proxyPort,
       };
@@ -249,6 +252,58 @@ export function saveConfig(
   fs.writeFileSync(dest, serialized, 'utf8');
   ensureGitIgnoreRules(cwd);
   return dest;
+}
+
+/** The usage limits that can be changed while the daemon runs, as fractions of each window (0.01–1.0). */
+export interface QuotaLimits {
+  fiveHour?: number;
+  weekly?: number;
+}
+
+/**
+ * Parses a usage limit typed by a person: `90`, `90%` or `0.9` all mean 90% of the window.
+ * Returns the limit as a fraction, or `undefined` when it is not a limit between 1% and 100%.
+ */
+export function parseLimitInput(value: string | number): number | undefined {
+  const raw = typeof value === 'number' ? value : parseFloat(String(value).trim().replace(/%$/, ''));
+  if (!Number.isFinite(raw) || raw <= 0) return undefined;
+  const fraction = raw > 1 ? raw / 100 : raw;
+  if (fraction < 0.01 || fraction > 1) return undefined;
+  return Math.round(fraction * 100) / 100;
+}
+
+/**
+ * Writes usage limits into the `quota` section of the saved config, keeping every other key in the file.
+ */
+export function saveQuotaLimits(limits: QuotaLimits, targetPath?: string, cwd: string = process.cwd()): string {
+  const dest = targetPath ? path.resolve(cwd, targetPath) : getConfigPath(cwd);
+  let existing: Record<string, any> = {};
+  if (fs.existsSync(dest)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(dest, 'utf8'));
+    } catch (err) {
+      throw new Error(`Failed to parse configuration file at ${dest}: ${err}`);
+    }
+  }
+  const quota: Record<string, unknown> = { ...(existing.quota ?? {}) };
+  if (limits.fiveHour !== undefined) {
+    quota.utilizationThresholdLimit = limits.fiveHour;
+    delete quota.utilizationThreshold;
+  }
+  if (limits.weekly !== undefined) quota.weeklyThresholdLimit = limits.weekly;
+  return saveConfig({ quota } as any, dest, cwd);
+}
+
+/** Reads the usage limits from the saved config, filling in the defaults for those not set. */
+export function readQuotaLimits(targetPath?: string, cwd: string = process.cwd()): Required<QuotaLimits> {
+  const dest = targetPath ? path.resolve(cwd, targetPath) : getConfigPath(cwd);
+  let quotaRaw: Record<string, unknown> = {};
+  if (fs.existsSync(dest)) {
+    const raw = JSON.parse(fs.readFileSync(dest, 'utf8'));
+    quotaRaw = raw?.quota ?? {};
+  }
+  const parsed = AutoPilotConfigSchema.shape.quota.parse(quotaRaw);
+  return { fiveHour: parsed.utilizationThresholdLimit, weekly: parsed.weeklyThresholdLimit };
 }
 
 export function ensureGitIgnoreRules(cwd: string = process.cwd()): void {

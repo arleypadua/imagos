@@ -16,10 +16,19 @@ import { Dashboard } from "../ui/dashboard.js";
 import { StateManager } from "../state/manager.js";
 import { AgentEventBus } from "../events/bus.js";
 import { resolveTelegramCredentials } from "../config/credentials.js";
-import { saveConfig, getIssueRepository, getExternalIssueRepository } from "../config/schema.js";
+import {
+  saveConfig,
+  saveQuotaLimits,
+  readQuotaLimits,
+  getConfigPath,
+  getIssueRepository,
+  getExternalIssueRepository,
+  type QuotaLimits,
+} from "../config/schema.js";
 import { formatIssueRef, issueRepoFlag } from "../runners/prompt.js";
 import { TelegramRemoteProvider } from "../remote/telegram.js";
 import { RemoteControlManager } from "../remote/manager.js";
+import { escapeMarkdown } from "../remote/formatters.js";
 import type {
   RemoteActionController,
   StatusSummary,
@@ -31,7 +40,12 @@ import type {
   BrowseIssueSummary,
   ChildTicketSummary,
   StandaloneIssueSummary,
+  IssueLinks,
+  QuotaLimitsSummary,
 } from "../remote/types.js";
+
+const PR_LOOKUP_TTL_MS = 2 * 60 * 1000;
+const INSPECT_EVENT_COUNT = 15;
 
 export class Orchestrator implements RemoteActionController {
   private config: AutoPilotConfig;
@@ -65,9 +79,13 @@ export class Orchestrator implements RemoteActionController {
     issueNumber?: number;
   }> = [];
   private isSessionStarted: boolean = true;
+  private configPath: string;
+  private configWatcher?: () => void;
+  private prLookupCache: Map<number, { at: number; pr?: { url: string; number: number; state: string } }> = new Map();
 
-  constructor(config: AutoPilotConfig) {
+  constructor(config: AutoPilotConfig, options: { configPath?: string } = {}) {
     this.config = config;
+    this.configPath = options.configPath ?? getConfigPath();
     this.gh = new GitHubClient({ repository: getIssueRepository(config) });
     this.codeGh = getExternalIssueRepository(config)
       ? new GitHubClient({ repository: config.repository })
@@ -113,6 +131,7 @@ export class Orchestrator implements RemoteActionController {
             notifications:
               this.config.remote?.telegram?.notifications ??
               this.config.telegram?.notifications,
+            issueRepository: getIssueRepository(this.config),
             eventBus: this.eventBus,
             actionController: this,
             quotaMonitor: this.quotaMonitor,
@@ -134,7 +153,7 @@ export class Orchestrator implements RemoteActionController {
     this.isSessionStarted = true;
 
     // Setup quota event listeners
-    this.quotaMonitor.on("quota_paused", ({ resetAt, waitMs, runnerName, affectedIssues }) => {
+    this.quotaMonitor.on("quota_paused", ({ resetAt, waitMs, runnerName, affectedIssues, reason }) => {
       const configuredAllowed = this.config.allowedProviders || this.config.allowedRunners;
       if (
         runnerName &&
@@ -157,14 +176,16 @@ export class Orchestrator implements RemoteActionController {
         waitMinutes,
         runnerName,
         activeTasks.length > 0 ? activeTasks : undefined,
+        reason,
       );
       const runnerStr = runnerName ? ` [${runnerName}]` : "";
       const taskStr =
         activeTasks.length > 0
           ? ` (Tasks: ${activeTasks.map((n: number) => `#${n}`).join(", ")})`
           : "";
+      const limitStr = reason?.toLowerCase().includes("weekly") ? "Weekly quota limit" : "5h Quota limit";
       this.dashboard.log(
-        `5h Quota limit hit${runnerStr}. Suspended workers${taskStr} until ${resetAt.toLocaleTimeString()}`,
+        `${limitStr} hit${runnerStr}. Suspended workers${taskStr} until ${resetAt.toLocaleString()}`,
       );
     });
 
@@ -322,6 +343,8 @@ export class Orchestrator implements RemoteActionController {
       this.dashboard.log(`Initial tick skipped: ${err.message}`);
     }
 
+    this.watchConfigForLimitChanges();
+
     // Setup polling
     this.pollTimer = setInterval(async () => {
       try {
@@ -339,6 +362,8 @@ export class Orchestrator implements RemoteActionController {
       clearInterval(this.pollTimer);
       this.pollTimer = undefined;
     }
+    this.configWatcher?.();
+    this.configWatcher = undefined;
     if (this.remoteManager) {
       try {
         await this.remoteManager.stop();
@@ -812,7 +837,7 @@ export class Orchestrator implements RemoteActionController {
           issue.number,
           "QUOTA_PAUSED",
           "paused_quota",
-          "Paused due to 5h quota limits",
+          "Paused due to quota limits",
         );
         this.dashboard.updateWorker({
           issueNumber: issue.number,
@@ -1964,7 +1989,7 @@ ${autoMergeStep}
 
     const node = this.dag.getNode(issueNumber);
     const title = node?.issue.title;
-    const parts: string[] = [title ? `*Issue #${issueNumber}: ${title}*` : `*Issue #${issueNumber}*`];
+    const parts: string[] = [title ? `*Issue #${issueNumber}: ${escapeMarkdown(title)}*` : `*Issue #${issueNumber}*`];
 
     const isPriorityQueued = this.manualPriorityQueue.includes(issueNumber);
     const isActive = this.activeTaskNumbers.has(issueNumber);
@@ -2015,9 +2040,12 @@ ${autoMergeStep}
 
     const events = this.eventBus.getHistory(issueNumber);
     if (events.length > 0) {
-      parts.push("\n*Latest Activity in Live Tail*:");
-      for (const e of events.slice(-5)) {
-        parts.push(`• [${e.timestamp}] ${e.summary}`);
+      const shown = events.slice(-INSPECT_EVENT_COUNT);
+      const header = events.length > shown.length ? ` (last ${shown.length} of ${events.length})` : "";
+      parts.push(`\n*Latest Activity in Live Tail*${header}:`);
+      for (const e of shown) {
+        const summary = e.summary.length > 220 ? `${e.summary.slice(0, 217)}...` : e.summary;
+        parts.push(`• [${e.timestamp}] ${escapeMarkdown(summary)}`);
       }
     }
 
@@ -2166,5 +2194,164 @@ ${autoMergeStep}
       message: msg,
       savedPath,
     };
+  }
+
+  public getConfigPath(): string {
+    return this.configPath;
+  }
+
+  public getQuotaLimits(): QuotaLimitsSummary {
+    const { fiveHourPercent, weeklyPercent } = this.quotaMonitor.getThresholds();
+    const status = this.quotaMonitor.getStatus();
+    const windows: QuotaLimitsSummary["windows"] = [];
+    for (const usage of Object.values(status.runnerUsage ?? {})) {
+      for (const b of usage.buckets) {
+        windows.push({
+          runnerName: usage.runnerName,
+          name: b.name,
+          windowType: b.windowType,
+          usedPercentage: b.usedPercentage,
+          limitPercent: b.windowType === "weekly" ? weeklyPercent : fiveHourPercent,
+          resetText: b.resetText,
+        });
+      }
+    }
+    return {
+      fiveHourPercent,
+      weeklyPercent,
+      pauseOnLimit: this.config.quota.pauseOnLimit !== false,
+      windows,
+      pausedRunners: Object.values(status.pausedRunners ?? {}).map((p) => ({
+        runnerName: p.runnerName,
+        resetAt: p.resetAt,
+        reason: p.reason,
+      })),
+      configPath: this.configPath,
+    };
+  }
+
+  /**
+   * Changes the usage limits on the running daemon and, unless `persist` is false, writes them to the saved
+   * config. Usage is re-read straight away so a lowered limit pauses and a raised one resumes without
+   * waiting for the next poll.
+   */
+  public async updateQuotaLimits(
+    limits: { fiveHourPercent?: number; weeklyPercent?: number },
+    options: { persist?: boolean } = {},
+  ): Promise<{ success: boolean; message: string; limits: QuotaLimitsSummary }> {
+    const toFraction = (pct?: number) =>
+      pct === undefined ? undefined : Math.min(1, Math.max(0.01, Math.round(pct) / 100));
+    const fiveHour = toFraction(limits.fiveHourPercent);
+    const weekly = toFraction(limits.weeklyPercent);
+
+    const changed = this.applyQuotaLimits({ fiveHour, weekly });
+    if (options.persist !== false && (fiveHour !== undefined || weekly !== undefined)) {
+      saveQuotaLimits({ fiveHour, weekly }, this.configPath);
+    }
+
+    await this.quotaMonitor.fetchLiveUsage(true).catch(() => null);
+    if (!this.quotaMonitor.areAllRunnersPaused() && this.stateMgr.getDaemonStatus() === "paused_quota") {
+      this.stateMgr.updateDaemonStatus("running");
+    }
+    this.tick().catch(() => {});
+
+    const summary = this.getQuotaLimits();
+    const message = `Limits ${changed ? "updated" : "unchanged"}: 5h ${summary.fiveHourPercent}%, weekly ${summary.weeklyPercent}%.`;
+    return { success: true, message, limits: summary };
+  }
+
+  // Applies limits to the in-memory config and the quota monitor; reports whether anything changed.
+  private applyQuotaLimits(limits: QuotaLimits): boolean {
+    const quota = { ...this.config.quota };
+    let changed = false;
+    if (limits.fiveHour !== undefined && limits.fiveHour !== quota.utilizationThresholdLimit) {
+      quota.utilizationThresholdLimit = limits.fiveHour;
+      quota.utilizationThreshold = limits.fiveHour;
+      changed = true;
+    }
+    if (limits.weekly !== undefined && limits.weekly !== quota.weeklyThresholdLimit) {
+      quota.weeklyThresholdLimit = limits.weekly;
+      changed = true;
+    }
+    if (changed) {
+      this.config.quota = quota;
+      this.quotaMonitor.setOptions({
+        utilizationThresholdLimit: this.config.quota.utilizationThresholdLimit,
+        weeklyThresholdLimit: this.config.quota.weeklyThresholdLimit,
+      });
+      const { fiveHourPercent, weeklyPercent } = this.quotaMonitor.getThresholds();
+      this.dashboard.log(`Usage limits now 5h ${fiveHourPercent}%, weekly ${weeklyPercent}%.`);
+    }
+    return changed;
+  }
+
+  // `imagos limits` and hand edits change the saved config while the daemon runs: pick the limits up from there.
+  private watchConfigForLimitChanges(): void {
+    if (this.configWatcher) return;
+    const file = this.configPath;
+    const listener = (curr: fs.Stats, prev: fs.Stats) => {
+      if (curr.mtimeMs === prev.mtimeMs) return;
+      try {
+        const limits = readQuotaLimits(file);
+        if (this.applyQuotaLimits(limits)) {
+          this.quotaMonitor
+            .fetchLiveUsage(true)
+            .then(() => this.tick())
+            .catch(() => {});
+        }
+      } catch (err: any) {
+        this.dashboard.log(`Ignoring config change at ${file}: ${err.message}`);
+      }
+    };
+    fs.watchFile(file, { interval: 2000, persistent: false }, listener);
+    this.configWatcher = () => fs.unwatchFile(file, listener);
+  }
+
+  /** Links to an issue and, when one exists, the pull request for its branch. */
+  public async getIssueLinks(issueNumber: number): Promise<IssueLinks> {
+    const issueRepo = getIssueRepository(this.config);
+    const node = this.dag.getNode(issueNumber);
+    const issueUrl =
+      node?.issue.url || (issueRepo ? `https://github.com/${issueRepo}/issues/${issueNumber}` : undefined);
+
+    const session = this.stateMgr.getSession(issueNumber);
+    if (session?.metadata?.prUrl) {
+      return { issueUrl, prUrl: session.metadata.prUrl, prNumber: session.metadata.prNumber };
+    }
+
+    const cached = this.prLookupCache.get(issueNumber);
+    if (cached && Date.now() - cached.at < PR_LOOKUP_TTL_MS) {
+      return { issueUrl, prUrl: cached.pr?.url, prNumber: cached.pr?.number, prState: cached.pr?.state };
+    }
+
+    const branchName =
+      this.dashboard.getActiveWorkers().get(issueNumber)?.branchName ||
+      session?.metadata?.branchName ||
+      (node ? this.worktreeMgr.getBranchName(issueNumber, node.issue.title) : undefined);
+    let pr: { url: string; number: number; state: string } | undefined;
+    if (branchName) {
+      pr = await this.codeGh.findPRForBranch(branchName);
+    }
+    this.prLookupCache.set(issueNumber, { at: Date.now(), pr });
+    return { issueUrl, prUrl: pr?.url, prNumber: pr?.number, prState: pr?.state };
+  }
+
+  /** Where an issue stands, for choosing which controls to offer next to it. */
+  public getIssueState(issueNumber: number): "running" | "paused" | "queued" | "idle" {
+    const worker = this.dashboard.getActiveWorkers().get(issueNumber);
+    if (worker) {
+      const paused =
+        worker.status === "paused_quota" ||
+        (worker.runnerName && this.quotaMonitor.isRunnerPaused(worker.runnerName));
+      return paused ? "paused" : "running";
+    }
+    if (this.activeTaskNumbers.has(issueNumber)) return "running";
+    if (
+      this.manualPriorityQueue.includes(issueNumber) ||
+      this.dag.getReadyNodes().some((n) => n.issue.number === issueNumber)
+    ) {
+      return "queued";
+    }
+    return "idle";
   }
 }

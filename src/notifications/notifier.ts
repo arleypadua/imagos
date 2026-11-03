@@ -110,14 +110,15 @@ export class Notifier {
     resetAt: Date,
     waitMinutes: number,
     runnerName?: string,
-    affectedIssues?: number[]
+    affectedIssues?: number[],
+    reason?: string
   ): void {
     const timeStr = resetAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const runnerStr = runnerName ? ` [${runnerName}]` : '';
     const taskStr = affectedIssues && affectedIssues.length > 0 ? ` (Tasks: ${affectedIssues.map(n => `#${n}`).join(', ')})` : '';
     const raw = `⏳ [Quota Limit] Pausing workers until ${timeStr} (~${waitMinutes} min)${runnerStr}${taskStr}`;
     Notifier.emitLog(raw, pc.red(`\n${raw}`));
-    const payload: QuotaPausedNotificationPayload = { resetAt, waitMinutes, runnerName, affectedIssues };
+    const payload: QuotaPausedNotificationPayload = { resetAt, waitMinutes, runnerName, affectedIssues, reason };
     Notifier.emitter.emit('quota_paused', payload);
   }
 

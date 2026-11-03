@@ -10,6 +10,9 @@ import { Notifier } from '../src/notifications/notifier.js';
 import { AgentEventBus } from '../src/events/bus.js';
 import { QuotaMonitor } from '../src/quota/monitor.js';
 
+// Notifications look up issue/PR links before sending, so they land a few microtasks after the event.
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 class MockRemoteProvider implements RemoteControlProvider {
   public readonly name = 'mock';
   public isStarted = false;
@@ -341,6 +344,7 @@ describe('RemoteControlManager', () => {
       sessionId: 'session-123',
     });
 
+    await flush();
     expect(provider.sentMessages.length).toBe(1);
     expect(provider.sentMessages[0].options?.chatId).toBe(123456);
     expect(provider.sentMessages[0].text).toContain('[arleypadua/imagos] 🤖 *Task Started*: #24');
@@ -355,6 +359,7 @@ describe('RemoteControlManager', () => {
       'main'
     );
 
+    await flush();
     expect(provider.sentMessages.length).toBe(2);
     expect(provider.sentMessages[1].text).toContain('[arleypadua/imagos] 🎉 *Task Completed & Merged*: #24');
     expect(provider.sentMessages[1].text).toContain('• *Pull Request*: [PR #30]');
@@ -362,6 +367,7 @@ describe('RemoteControlManager', () => {
     // 3. Spec Completed
     Notifier.notifySpecComplete(22, 'Spec: Extensible Remote Control');
 
+    await flush();
     expect(provider.sentMessages.length).toBe(3);
     expect(provider.sentMessages[2].text).toContain('[arleypadua/imagos] 🏆 *Spec Complete*: #22');
 
@@ -374,6 +380,7 @@ describe('RemoteControlManager', () => {
       30
     );
 
+    await flush();
     expect(provider.sentMessages.length).toBe(4);
     expect(provider.sentMessages[3].text).toContain('[arleypadua/imagos] ❓ *Feedback Needed*: #24');
     expect(provider.sentMessages[3].text).toContain('Should we enable auto-retry by default?');
@@ -382,6 +389,7 @@ describe('RemoteControlManager', () => {
     const resetTime = new Date('2026-08-20T19:00:00Z');
     Notifier.notifyQuotaPaused(resetTime, 45, 'claude');
 
+    await flush();
     expect(provider.sentMessages.length).toBe(5);
     expect(provider.sentMessages[4].text).toContain('[arleypadua/imagos] ⏳ *Quota Limit Reached*');
     expect(provider.sentMessages[4].text).toContain('• *Runner*: `claude`');
@@ -392,6 +400,7 @@ describe('RemoteControlManager', () => {
     // 6. Quota Resumed
     Notifier.notifyQuotaResumed('claude');
 
+    await flush();
     expect(provider.sentMessages.length).toBe(6);
     expect(provider.sentMessages[5].text).toContain('[arleypadua/imagos] ▶️ *Quota Resumed*');
   });
@@ -412,6 +421,7 @@ describe('RemoteControlManager', () => {
     const resetAt = new Date(Date.now() + 30 * 60 * 1000);
     quotaMonitor.triggerQuotaPause(resetAt, '5h session limit reached', 'agy');
 
+    await flush();
     expect(provider.sentMessages.length).toBe(1);
     expect(provider.sentMessages[0].text).toContain('[arleypadua/imagos] ⏳ *Quota Limit Reached*');
     expect(provider.sentMessages[0].text).toContain('• *Runner*: `agy`');
@@ -419,6 +429,7 @@ describe('RemoteControlManager', () => {
 
     quotaMonitor.resumeFromQuota('agy');
 
+    await flush();
     expect(provider.sentMessages.length).toBe(2);
     expect(provider.sentMessages[1].text).toContain('[arleypadua/imagos] ▶️ *Quota Resumed*');
   });
@@ -440,6 +451,7 @@ describe('RemoteControlManager', () => {
       runnerName: 'claude',
     });
 
+    await flush();
     expect(provider.sentMessages.length).toBe(1);
     const originalText = provider.sentMessages[0].text;
 
@@ -458,7 +470,9 @@ describe('RemoteControlManager', () => {
     expect(provider.editedMessages[0].messageId).toBe(1);
     expect(provider.editedMessages[0].text).toContain(originalText);
     expect(provider.editedMessages[0].text).toContain('▶️ Resumed by developer at');
-    expect(provider.editedMessages[0].options?.actions).toEqual([]);
+    // The resume button is gone; what is left leads on to status and the menu
+    const followUps = provider.editedMessages[0].options?.actions?.flat().map((b) => b.payload);
+    expect(followUps).toEqual(['v1:n:status', 'v1:n:menu']);
   });
 
   it('handles quota resumption for all runners when runner is empty or all', async () => {
@@ -555,6 +569,7 @@ describe('RemoteControlManager', () => {
       runnerName: 'agy',
       branchName: 'branch-1',
     });
+    await flush();
     expect(provider.sentMessages.length).toBe(1);
 
     await manager.stop();
@@ -567,6 +582,7 @@ describe('RemoteControlManager', () => {
       runnerName: 'agy',
       branchName: 'branch-2',
     });
+    await flush();
     expect(provider.sentMessages.length).toBe(1); // No new message sent
   });
 
@@ -601,16 +617,19 @@ describe('RemoteControlManager', () => {
       expect(msg.options?.actions).toBeDefined();
 
       const actions = msg.options!.actions!;
-      // 3 choice buttons + 1 GitHub PR link button
-      expect(actions.length).toBe(4);
+      // 3 choice buttons + issue/PR links + inspect/logs
+      expect(actions.length).toBe(5);
       expect(actions[0][0].label).toBe('Claude 3.7 Sonnet');
       expect(actions[0][0].payload).toBe('v1:inf:26:0');
       expect(actions[1][0].label).toBe('Antigravity Agent (AGY)');
       expect(actions[1][0].payload).toBe('v1:inf:26:1');
       expect(actions[2][0].label).toBe('Fallback Hybrid');
       expect(actions[2][0].payload).toBe('v1:inf:26:2');
-      expect(actions[3][0].label).toBe('🔗 Open on GitHub');
-      expect(actions[3][0].url).toBe('https://github.com/arleypadua/imagos/pull/35');
+      expect(actions[3][0].label).toBe('🔗 Issue #26');
+      expect(actions[3][0].url).toBe('https://github.com/arleypadua/imagos/issues/26');
+      expect(actions[3][1].label).toBe('🔀 PR #35');
+      expect(actions[3][1].url).toBe('https://github.com/arleypadua/imagos/pull/35');
+      expect(actions[4].map((b) => b.payload)).toEqual(['v1:n:inspect:26', 'v1:n:logs:26']);
     });
 
     it('handles option button click: acknowledges query, edits message with selection, removes buttons, and invokes actionController', async () => {
@@ -645,7 +664,9 @@ describe('RemoteControlManager', () => {
       const edited = provider.editedMessages[0];
       expect(edited.messageId).toBe(1);
       expect(edited.text).toContain('✅ *Answered* (via button): PostgreSQL');
-      expect(edited.options?.actions).toEqual([]);
+      // Choice buttons are removed; links and follow-ups stay
+      expect(edited.options?.actions?.flat().some((b) => b.payload.startsWith('v1:inf'))).toBe(false);
+      expect(edited.options?.actions?.flat().some((b) => b.url?.includes('/issues/26'))).toBe(true);
 
       // Second click on the same issue is ignored (locked message)
       await provider.triggerAction('v1:inf:26:1', 999);
@@ -687,7 +708,8 @@ describe('RemoteControlManager', () => {
       const edited = provider.editedMessages[0];
       expect(edited.messageId).toBe(messageId);
       expect(edited.text).toContain('✅ *Answered* (via text): Use port 8080 and 30s timeout');
-      expect(edited.options?.actions).toEqual([]);
+      expect(edited.options?.actions?.flat().some((b) => b.payload.startsWith('v1:inf'))).toBe(false);
+      expect(edited.options?.actions?.flat().some((b) => b.url?.includes('/issues/42'))).toBe(true);
 
       // Second reply to the same message is ignored
       await provider.triggerTextReply(messageId, 'Another reply', 999);
@@ -754,11 +776,15 @@ describe('RemoteControlManager', () => {
 
       const actions = msg.options?.actions;
       expect(actions).toBeDefined();
-      expect(actions!.length).toBe(2);
+      // pause row, resume row, run-now row for the queued task, footer
+      expect(actions!.length).toBe(4);
       expect(actions![0][0].label).toBe('⏸️ Pause #24');
       expect(actions![0][0].payload).toBe('v1:t:pause:24');
+      expect(actions![0][1].payload).toBe('v1:n:inspect:24');
       expect(actions![1][0].label).toBe('▶️ Resume #25');
       expect(actions![1][0].payload).toBe('v1:t:resume:25');
+      expect(actions![2][0].payload).toBe('v1:a:now:26');
+      expect(actions![3].map((b) => b.payload)).toEqual(['v1:n:tasks', 'v1:n:menu']);
     });
 
     it('/pause without arguments pauses global task dispatching', async () => {
@@ -809,7 +835,8 @@ describe('RemoteControlManager', () => {
 
       const actions = msg.options?.actions;
       expect(actions).toBeDefined();
-      expect(actions!.length).toBe(3);
+      // two scope buttons, all-specs, footer
+      expect(actions!.length).toBe(4);
       expect(actions![0][0].label).toBe('🎯 Scope to #22');
       expect(actions![0][0].payload).toBe('v1:s:set:22');
       expect(actions![1][0].label).toBe('🎯 Scope to #10');

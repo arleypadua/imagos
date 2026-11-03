@@ -45,6 +45,7 @@ export interface ClaudeLiveUsage {
   sessionResetAt?: Date;
   weekUsedPercentage?: number;
   weekResetText?: string;
+  weekResetAt?: Date;
   lastFetchedAt: Date;
 }
 
@@ -52,8 +53,18 @@ export interface QuotaMonitorOptions {
   pauseOnLimit?: boolean;
   utilizationThresholdLimit?: number;
   utilizationThreshold?: number;
+  /** Fraction (0.01–1.0) of the weekly window a runner may use before it is paused. */
+  weeklyThresholdLimit?: number;
   proxyPort?: number;
   allowedProviders?: string[];
+}
+
+export const DEFAULT_FIVE_HOUR_THRESHOLD = 0.85;
+export const DEFAULT_WEEKLY_THRESHOLD = 0.9;
+
+/** Converts a threshold expressed as a fraction (0.9) or a percentage (90) to a whole percentage. */
+export function toThresholdPercent(raw: number): number {
+  return raw <= 1.0 ? Math.round(raw * 100) : Math.round(raw);
 }
 
 export interface RunnerPauseInfo {
@@ -62,6 +73,8 @@ export interface RunnerPauseInfo {
   resetAt: Date;
   reason: string;
   affectedIssues?: number[];
+  /** `threshold` pauses come from the configured limits, so changing those limits can lift them. */
+  source?: 'threshold' | 'rate_limit';
 }
 
 export interface QuotaStatus {

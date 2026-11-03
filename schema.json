@@ -180,7 +180,7 @@
           "minimum": 0.01,
           "maximum": 1.0,
           "default": 0.85,
-          "description": "Proactive quota utilization threshold to pause task execution (e.g. 0.70 for 70%)"
+          "description": "Share of the 5h session window a runner may use before its workers are paused (e.g. 0.70 for 70%)"
         },
         "utilizationThreshold": {
           "type": "number",
@@ -188,6 +188,13 @@
           "maximum": 1.0,
           "default": 0.85,
           "description": "Alias for utilizationThresholdLimit"
+        },
+        "weeklyThresholdLimit": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 1.0,
+          "default": 0.9,
+          "description": "Share of the weekly window a runner may use before its workers are paused (e.g. 0.90 for 90%)"
         },
         "proxyPort": {
           "type": "integer",

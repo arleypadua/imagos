@@ -11,7 +11,9 @@ import type {
   SecurityStatusInfo,
   InteractiveAction,
   BrowseIssueSummary,
+  QuotaLimitsSummary,
 } from './types.js';
+import { buildIssueNumberRows } from './navigation.js';
 import {
   ENQUEUE_ALIASES,
   ENQUEUE_EXAMPLES,
@@ -232,21 +234,35 @@ export function formatQuotaPaused(
   payload: QuotaPausedNotificationPayload
 ): string {
   const repoTag = formatRepoTag(repository);
-  const timeStr = payload.resetAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const isWeekly = Boolean(payload.reason?.toLowerCase().includes('weekly'));
+  const timeStr =
+    payload.waitMinutes > 20 * 60
+      ? payload.resetAt.toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : payload.resetAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const lines = [
     `${repoTag}⏳ *Quota Limit Reached*`,
     '',
-    `5h rolling quota reached. Pausing workers.`,
-    `• *Resumes at*: ${timeStr} (~${payload.waitMinutes}m)`,
+    isWeekly ? `Weekly quota limit reached. Pausing workers.` : `5h rolling quota reached. Pausing workers.`,
+    `• *Resumes at*: ${timeStr} (~${formatDuration(payload.waitMinutes)})`,
   ];
   if (payload.runnerName) {
     lines.push(`• *Runner*: \`${payload.runnerName}\``);
+  }
+  if (payload.reason) {
+    lines.push(`• *Reason*: ${escapeMarkdown(payload.reason)}`);
   }
   if (payload.affectedIssues && payload.affectedIssues.length > 0) {
     const issuesStr = payload.affectedIssues.map((n) => `#${n}`).join(', ');
     lines.push(`• *Suspended Tasks*: ${issuesStr}`);
   }
   return lines.join('\n');
+}
+
+function formatDuration(minutes: number): string {
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h${minutes % 60 ? ` ${minutes % 60}m` : ''}`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 
 /**
@@ -327,7 +343,7 @@ export function formatStatus(repository: string | undefined, summary: Partial<St
   // 1. Health Status
   let healthText = '🟢 Running (Dispatching Active)';
   if (summary.quota?.isPaused || summary.daemonStatus === 'paused_quota' || summary.status === 'paused_quota') {
-    healthText = '⏸️ Paused (5h Quota Limit)';
+    healthText = '⏸️ Paused (Quota Limit)';
   } else if (summary.isDispatchingPaused || summary.isSessionStarted === false) {
     healthText = '⏸️ Paused (Dispatching Disabled)';
   } else if (summary.daemonStatus === 'idle' || summary.status === 'idle') {
@@ -409,6 +425,7 @@ export function formatTasks(
           label: `⏸️ Pause #${t.issueNumber}`,
           payload: `v1:t:pause:${t.issueNumber}`,
         },
+        { id: `n_ins_${t.issueNumber}`, label: `🔍 #${t.issueNumber}`, payload: `v1:n:inspect:${t.issueNumber}` },
       ]);
     }
   }
@@ -427,6 +444,7 @@ export function formatTasks(
           label: `▶️ Resume #${t.issueNumber}`,
           payload: `v1:t:resume:${t.issueNumber}`,
         },
+        { id: `n_ins_${t.issueNumber}`, label: `🔍 #${t.issueNumber}`, payload: `v1:n:inspect:${t.issueNumber}` },
       ]);
     }
   }
@@ -438,6 +456,12 @@ export function formatTasks(
     for (const t of tasksData.queued) {
       const runnerStr = t.runnerName ? ` (\`${t.runnerName}\`)` : '';
       lines.push(`• *#${t.issueNumber}* - ${escapeMarkdown(t.title)}${runnerStr}`);
+    }
+    for (const t of tasksData.queued.slice(0, 4)) {
+      actions.push([
+        { id: `a_now_${t.issueNumber}`, label: `⚡ Run #${t.issueNumber} now`, payload: `v1:a:now:${t.issueNumber}` },
+        { id: `n_ins_${t.issueNumber}`, label: `🔍 #${t.issueNumber}`, payload: `v1:n:inspect:${t.issueNumber}` },
+      ]);
     }
   }
 
@@ -510,6 +534,7 @@ export function formatHelp(
     `${repoTag}📖 *Imagos Remote Bot Help*`,
     '',
     '*Available Slash Commands*:',
+    '• `/menu` - Main menu: tap through status, tasks, issues, inspect, logs and limits',
     '• `/status` - View daemon health, active workers, git branches, and target specs',
     '• `/tasks` - View in-progress, paused, and queued tasks with pause/resume controls',
     '• `/browse` - Paginated list of open issues with links',
@@ -521,6 +546,7 @@ export function formatHelp(
     '• `/clean` - Clean inactive worktrees and temp branches',
     '• `/inspect <issue>` - Inspect active worker tool calls & diffs',
     '• `/logs <issue>` - View recent daemon logs',
+    '• `/limits [5h <pct>] [weekly <pct>]` - View or change the usage limits workers pause at',
     '• `/help` - Show command reference and usage',
   ];
 
@@ -764,12 +790,14 @@ export function formatInspectHelp(
   return lines.join('\n');
 }
 
+const LOGS_MAX_CHARS = 3600;
+
 /**
  * Formats response for /logs command.
  */
 export function formatLogs(repository: string | undefined, issueNumber: number, logs: string): string {
   const repoTag = formatRepoTag(repository);
-  const truncated = logs.length > 3000 ? logs.slice(-3000) : logs;
+  const truncated = logs.length > LOGS_MAX_CHARS ? logs.slice(-LOGS_MAX_CHARS) : logs;
   return `${repoTag}📜 *Logs: Issue #${issueNumber}*\n\n\`\`\`\n${truncated}\n\`\`\``;
 }
 
@@ -1136,6 +1164,8 @@ export function formatBrowse(
     actions.push(navRow);
   }
 
+  actions.push(...buildIssueNumberRows(pageIssues.map((i) => i.number)));
+
   if (repository) {
     actions.push([
       { id: 'gh_browse', label: '🔗 Open GitHub Backlog', payload: '', url: `https://github.com/${repository}/issues` },
@@ -1143,4 +1173,87 @@ export function formatBrowse(
   }
 
   return { text: lines.join('\n'), actions };
+}
+
+/**
+ * The main menu: a one-glance summary above buttons into every view.
+ */
+export function formatMenu(
+  repository: string | undefined,
+  summary: Partial<StatusSummary> & Record<string, any>,
+  limits?: QuotaLimitsSummary
+): string {
+  const repoTag = formatRepoTag(repository);
+  const activeCount = summary.activeWorkerCount ?? summary.activeWorkers?.length ?? 0;
+  const maxConcurrency = summary.maxConcurrency ?? 2;
+  let health = '🟢 Running';
+  if (summary.quota?.isPaused) health = '⏸️ Quota-paused';
+  else if (summary.isDispatchingPaused) health = '⏸️ Dispatching paused';
+  else if (summary.daemonStatus === 'idle') health = '⚪ Idle';
+
+  const lines = [`${repoTag}🏠 *Imagos*`, '', `${health} · ${activeCount}/${maxConcurrency} workers`];
+  if (limits) {
+    lines.push(`⚙️ Limits: 5h ${limits.fiveHourPercent}% · weekly ${limits.weeklyPercent}%`);
+  }
+  lines.push('', 'Where to?');
+  return lines.join('\n');
+}
+
+function usageBar(used: number, limit: number): string {
+  const width = 10;
+  const filled = Math.min(width, Math.round((Math.min(used, 100) / 100) * width));
+  const bar = '█'.repeat(filled) + '░'.repeat(width - filled);
+  const icon = used >= limit ? '🔴' : used >= limit - 10 ? '🟡' : '🟢';
+  return `${icon} \`${bar}\``;
+}
+
+/**
+ * The usage limits view: the limit for each window, how much of it each runner has used, and what is paused.
+ */
+export function formatLimits(
+  repository: string | undefined,
+  limits: QuotaLimitsSummary,
+  notice?: string
+): string {
+  const repoTag = formatRepoTag(repository);
+  const lines = [`${repoTag}⚙️ *Usage Limits*`];
+  if (notice) lines.push('', notice);
+  lines.push(
+    '',
+    'Workers pause once a window passes its limit and resume when it resets.',
+    '',
+    `• *5h session limit*: ${limits.fiveHourPercent}%`,
+    `• *Weekly limit*: ${limits.weeklyPercent}%`
+  );
+  if (!limits.pauseOnLimit) {
+    lines.push('', '⚠️ `quota.pauseOnLimit` is off: limits are shown but not enforced.');
+  }
+
+  if (limits.windows.length > 0) {
+    lines.push('', '*Current usage*:');
+    for (const w of limits.windows) {
+      const reset = w.resetText ? ` · resets ${escapeMarkdown(w.resetText)}` : '';
+      lines.push(`${usageBar(w.usedPercentage, w.limitPercent)} ${w.runnerName} · ${escapeMarkdown(w.name)}: *${w.usedPercentage}%* / ${w.limitPercent}%${reset}`);
+    }
+  }
+
+  if (limits.pausedRunners.length > 0) {
+    lines.push('', '*Paused*:');
+    for (const p of limits.pausedRunners) {
+      const until = new Date(p.resetAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+      lines.push(`⏳ \`${p.runnerName}\` until ${until} — ${escapeMarkdown(p.reason)}`);
+    }
+  }
+
+  lines.push('', 'Tap below, or send `/limits weekly 90` · `/limits 5h 85`.');
+  return lines.join('\n');
+}
+
+/**
+ * The prompt that asks for steering instructions; the reply goes to the issue's running session.
+ */
+export function formatSteerPrompt(repository: string | undefined, issueNumber: number, title?: string): string {
+  const repoTag = formatRepoTag(repository);
+  const titleStr = title ? ` - *${escapeMarkdown(title)}*` : '';
+  return `${repoTag}🧭 *Steer #${issueNumber}*${titleStr}\n\nReply to this message with the instructions to send to the session.`;
 }

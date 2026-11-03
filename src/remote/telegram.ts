@@ -5,11 +5,13 @@ import type {
   RemoteMessageOptions,
   TelegramRemoteProviderOptions,
   ActionContext,
+  InteractiveAction,
 } from './types.js';
 import { TelegramRateLimiter } from './rate_limiter.js';
 import { ActivityLogger } from '../logger/index.js';
 
 export const BOT_COMMANDS = [
+  { command: 'menu', description: 'Main menu: navigate status, tasks, issues and settings' },
   { command: 'start', description: 'Show command reference and status' },
   { command: 'status', description: 'View active tasks, worktrees & DAG' },
   { command: 'tasks', description: 'List in-progress and queued tasks' },
@@ -23,8 +25,35 @@ export const BOT_COMMANDS = [
   { command: 'clean', description: 'Clean inactive worktrees and temp branches' },
   { command: 'inspect', description: 'Inspect active worker tool calls & diffs' },
   { command: 'logs', description: 'View recent daemon logs' },
+  { command: 'limits', description: 'View or change usage limits: /limits weekly 90 | /limits 5h 85' },
   { command: 'help', description: 'Show command reference and usage' },
 ];
+
+function buildKeyboard(actions: InteractiveAction[][]): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const rows = actions.filter((row) => row.length > 0);
+  for (let r = 0; r < rows.length; r++) {
+    for (const btn of rows[r]) {
+      if (btn.url) {
+        keyboard.url(btn.label, btn.url);
+      } else {
+        keyboard.text(btn.label, btn.payload);
+      }
+    }
+    if (r < rows.length - 1) {
+      keyboard.row();
+    }
+  }
+  return keyboard;
+}
+
+function isMarkdownParseError(err: any): boolean {
+  return err?.error_code === 400 && /can't parse entities|can't find end of the entity/i.test(err?.description ?? '');
+}
+
+function isNotModifiedError(err: any): boolean {
+  return err?.error_code === 400 && /message is not modified/i.test(err?.description ?? '');
+}
 
 export class TelegramRemoteProvider implements RemoteControlProvider {
   public readonly name = 'telegram';
@@ -260,28 +289,26 @@ export class TelegramRemoteProvider implements RemoteControlProvider {
       extra.reply_to_message_id = options.replyToMessageId;
     }
 
-    if (options?.actions && options.actions.length > 0) {
-      const keyboard = new InlineKeyboard();
-      for (let r = 0; r < options.actions.length; r++) {
-        const row = options.actions[r];
-        for (const btn of row) {
-          if (btn.url) {
-            keyboard.url(btn.label, btn.url);
-          } else {
-            keyboard.text(btn.label, btn.payload);
-          }
-        }
-        if (r < options.actions.length - 1) {
-          keyboard.row();
-        }
-      }
-      extra.reply_markup = keyboard;
+    if (options?.actions && options.actions.some((row) => row.length > 0)) {
+      extra.reply_markup = buildKeyboard(options.actions);
+    } else if (options?.forceReply) {
+      extra.reply_markup = {
+        force_reply: true,
+        ...(options.forceReply.placeholder ? { input_field_placeholder: options.forceReply.placeholder.slice(0, 64) } : {}),
+      };
     }
 
     try {
-      const res = await this.rateLimiter.enqueue(targetChatId, () =>
-        this.bot.api.sendMessage(targetChatId, text, extra)
-      );
+      const res = await this.rateLimiter.enqueue(targetChatId, async () => {
+        try {
+          return await this.bot.api.sendMessage(targetChatId, text, extra);
+        } catch (err: any) {
+          // Text that arrives from issues and agents can break Markdown: send it plain rather than not at all.
+          if (!isMarkdownParseError(err)) throw err;
+          const { parse_mode: _ignored, ...plain } = extra;
+          return this.bot.api.sendMessage(targetChatId, text, plain);
+        }
+      });
       return { messageId: res.message_id };
     } catch (err: any) {
       if (err?.error_code === 400 && err?.description?.includes('chat not found')) {
@@ -315,31 +342,25 @@ export class TelegramRemoteProvider implements RemoteControlProvider {
       parse_mode: parseMode,
     };
 
-    if (options?.actions && options.actions.length > 0) {
-      const keyboard = new InlineKeyboard();
-      for (let r = 0; r < options.actions.length; r++) {
-        const row = options.actions[r];
-        for (const btn of row) {
-          if (btn.url) {
-            keyboard.url(btn.label, btn.url);
-          } else {
-            keyboard.text(btn.label, btn.payload);
-          }
-        }
-        if (r < options.actions.length - 1) {
-          keyboard.row();
-        }
-      }
-      extra.reply_markup = keyboard;
-    } else if (options?.actions && options.actions.length === 0) {
+    if (options?.actions && options.actions.some((row) => row.length > 0)) {
+      extra.reply_markup = buildKeyboard(options.actions);
+    } else if (options?.actions) {
       extra.reply_markup = { inline_keyboard: [] };
     }
 
     try {
-      await this.rateLimiter.enqueue(targetChatId, () =>
-        this.bot.api.editMessageText(targetChatId, messageId, text, extra)
-      );
+      await this.rateLimiter.enqueue(targetChatId, async () => {
+        try {
+          return await this.bot.api.editMessageText(targetChatId, messageId, text, extra);
+        } catch (err: any) {
+          if (!isMarkdownParseError(err)) throw err;
+          const { parse_mode: _ignored, ...plain } = extra;
+          return this.bot.api.editMessageText(targetChatId, messageId, text, plain);
+        }
+      });
     } catch (err: any) {
+      // A refresh that finds nothing new leaves the message as it is.
+      if (isNotModifiedError(err)) return;
       if (err?.error_code === 400 && err?.description?.includes('chat not found')) {
         const handleStr = this.botHandle ? ` (${this.botHandle})` : '';
         throw new Error(

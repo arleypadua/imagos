@@ -242,6 +242,7 @@ You can also run `/install-skills` inside the interactive TUI command palette.
 | `imagos inspect <issue>` | View live agent activity, tool calls, modified files, and git diff summary for an issue.        |
 | `imagos logs <issue>`    | View stdout and stderr output logs for a specific issue session.                                |
 | `imagos resume`          | Instantly clear quota pause and force immediate task execution.                                 |
+| `imagos limits`          | Show or change usage limits (`--weekly 90`, `--5h 85`); a running daemon applies them in seconds. |
 | `imagos clean`           | Remove inactive git worktrees, temporary branches, and finished session data.                   |
 | `imagos install-skills`  | Install Imagos AI agent skills via `skills.sh` (`npx skills add arleypadua/imagos`).            |
 | `imagos init`            | Create or update `.autopilot/config.json` with repository settings and runner selection.        |
@@ -273,7 +274,8 @@ Running `imagos init` creates `.autopilot/config.json`. You can customize it to 
   "cleanupWorktreeOnClose": true,
   "quota": {
     "pauseOnLimit": true,
-    "utilizationThresholdLimit": 0.85
+    "utilizationThresholdLimit": 0.85,
+    "weeklyThresholdLimit": 0.9
   },
   "labels": {
     "readyForAgent": "ready-for-agent",
@@ -300,7 +302,10 @@ Running `imagos init` creates `.autopilot/config.json`. You can customize it to 
 - `mergeMethod`: Method used when merging pull requests (`squash`, `merge`, or `rebase`).
 - `cleanupWorktreeOnClose`: Whether to delete the worktree folder once an issue is closed and merged (defaults to `true`).
 - `quota.pauseOnLimit`: Whether to automatically pause task execution when the quota threshold is reached (defaults to `true`).
-- `quota.utilizationThresholdLimit`: Proactive quota utilization threshold to pause task execution (defaults to `0.85`, e.g. `0.70` for 70%).
+- `quota.utilizationThresholdLimit`: Share of the 5h session window a runner may use before its workers pause (defaults to `0.85`, e.g. `0.70` for 70%).
+- `quota.weeklyThresholdLimit`: Share of the weekly window a runner may use before its workers pause until the week resets (defaults to `0.9`). This limit still applies when the 5h limit is lifted.
+
+Both limits can be changed while the daemon runs, with `imagos limits --weekly 90 --5h 85`, from Telegram with `/limits` (or the ⚙️ Limits buttons), or by editing the config file. The daemon picks the change up within a few seconds and the new values are saved to `.autopilot/config.json`.
 - `labels`: Mapping of canonical workflow labels to custom label names if your repository uses different names.
 
 ---

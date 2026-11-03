@@ -16,6 +16,8 @@ import type {
   TasksSummary,
   SpecsSummary,
   SecurityStatusInfo,
+  IssueLinks,
+  IssueRunState,
 } from './types.js';
 import type { TelegramNotificationsConfig } from '../types/index.js';
 import { AgentEventBus, type AgentEvent } from '../events/bus.js';
@@ -60,9 +62,51 @@ import {
   formatResumeUsage,
   formatBrowse,
   parseBrowseActionPayload,
+  formatMenu,
+  formatLimits,
+  formatSteerPrompt,
+  escapeMarkdown,
 } from './formatters.js';
+import {
+  NAV_PREFIX,
+  ACTION_PREFIX,
+  LIMIT_PREFIX,
+  parseNavCallbackData,
+  parseActionCallbackData,
+  parseLimitCallbackData,
+  parseLimitArgs,
+  buildLinkRow,
+  buildFooterRow,
+  buildMainMenuRows,
+  buildIssuePickerRows,
+  buildIssueControlRows,
+  buildLimitAdjustRows,
+  navButton,
+  actionButton,
+  urlButton,
+  type NavTarget,
+  type PickerItem,
+} from './navigation.js';
 import { parseEnqueueArgs, ENQUEUE_USAGE } from '../pipeline/enqueue_help.js';
 import type { QuotaMonitor } from '../quota/monitor.js';
+
+/** Telegram rejects messages over 4096 characters; leave room for the notice line a view may carry. */
+const MAX_MESSAGE_CHARS = 3900;
+const LOGS_TAIL_LINES = 60;
+const MAX_TRACKED_VIEWS = 500;
+
+interface View {
+  text: string;
+  actions: InteractiveAction[][];
+}
+
+function clampText(text: string): string {
+  if (text.length <= MAX_MESSAGE_CHARS) return text;
+  const cut = text.slice(0, MAX_MESSAGE_CHARS);
+  // An unterminated code block would break Markdown for the whole message.
+  const fences = (cut.match(/```/g) || []).length;
+  return `${cut}${fences % 2 === 1 ? '\n```' : ''}\n…`;
+}
 
 export interface SendQuotaPausedOptions extends RemoteMessageOptions {
   actions?: InteractiveAction[][];
@@ -71,6 +115,7 @@ export interface SendQuotaPausedOptions extends RemoteMessageOptions {
 export class RemoteControlManager {
   private provider: RemoteControlProvider;
   private repository?: string;
+  private issueRepository?: string;
   private defaultChatId?: number | string;
   private notifications: TelegramNotificationsConfig & { taskStarted?: boolean };
   private eventBus: AgentEventBus;
@@ -84,6 +129,8 @@ export class RemoteControlManager {
   private messageNeedsInfo: Map<number, ActiveNeedsInfoRecord> = new Map();
   private issueNeedsInfo: Map<number, ActiveNeedsInfoRecord> = new Map();
   private taskMessageMap: Map<number, number> = new Map();
+  /** Messages that show a view, which navigation may replace; notifications are never in here. */
+  private viewMessageIds: Set<number> = new Set();
 
   private boundOnTaskStarted: (payload: TaskStartedNotificationPayload) => void;
   private boundOnTaskCompleted: (payload: TaskCompletedNotificationPayload) => void;
@@ -98,6 +145,7 @@ export class RemoteControlManager {
   constructor(options: RemoteControlManagerOptions) {
     this.provider = options.provider;
     this.repository = options.repository;
+    this.issueRepository = options.issueRepository;
     this.defaultChatId = options.defaultChatId;
     this.notifications = {
       needsInfo: options.notifications?.needsInfo ?? true,
@@ -142,12 +190,12 @@ export class RemoteControlManager {
       });
     };
     if (this.quotaMonitor) {
-      this.boundOnQuotaMonitorPaused = ({ resetAt, waitMs, runnerName, affectedIssues }: any) => {
+      this.boundOnQuotaMonitorPaused = ({ resetAt, waitMs, runnerName, affectedIssues, reason }: any) => {
         const waitMinutes = Math.ceil(
           (waitMs ?? (resetAt ? Math.max(1000, new Date(resetAt).getTime() - Date.now()) : 60000)) /
             (60 * 1000)
         );
-        this.handleQuotaPaused({ resetAt: new Date(resetAt), waitMinutes, runnerName, affectedIssues }).catch((err) => {
+        this.handleQuotaPaused({ resetAt: new Date(resetAt), waitMinutes, runnerName, affectedIssues, reason }).catch((err) => {
           ActivityLogger.error('RemoteControlManager error handling quota_monitor paused:', err);
         });
       };
@@ -192,6 +240,18 @@ export class RemoteControlManager {
 
     this.provider.onAction('v1:b', async (_action, payload, userId, context) => {
       await this.handleBrowseAction(payload, userId, context);
+    });
+
+    this.provider.onAction(NAV_PREFIX, async (_action, payload, userId, context) => {
+      await this.handleNavAction(payload, userId, context);
+    });
+
+    this.provider.onAction(ACTION_PREFIX, async (_action, payload, userId, context) => {
+      await this.handleIssueOrDaemonAction(payload, userId, context);
+    });
+
+    this.provider.onAction(LIMIT_PREFIX, async (_action, payload, userId, context) => {
+      await this.handleLimitAction(payload, userId, context);
     });
 
     if (this.provider.onTextReply) {
@@ -254,6 +314,15 @@ export class RemoteControlManager {
       });
       this.provider.onCommand('help', async (args, userId, context) => {
         await this.handleHelpCommand(args, userId, context);
+      });
+      this.provider.onCommand('menu', async (args, userId, context) => {
+        await this.handleMenuCommand(args, userId, context);
+      });
+      this.provider.onCommand('limits', async (args, userId, context) => {
+        await this.handleLimitsCommand(args, userId, context);
+      });
+      this.provider.onCommand('settings', async (args, userId, context) => {
+        await this.handleLimitsCommand(args, userId, context);
       });
     }
   }
@@ -344,9 +413,14 @@ export class RemoteControlManager {
       return undefined;
     }
     const text = formatTaskStarted(this.repository, payload);
+    const links = await this.getLinks(payload.issueNumber);
     const msg = await this.provider.sendMessage(text, {
       chatId: chatId ?? this.defaultChatId,
       parseMode: 'Markdown',
+      actions: [
+        ...buildIssueControlRows(payload.issueNumber, 'running', 'other'),
+        buildLinkRow(payload.issueNumber, links),
+      ].filter((r) => r.length > 0),
     });
     if (msg?.messageId) {
       this.taskMessageMap.set(msg.messageId, payload.issueNumber);
@@ -362,9 +436,14 @@ export class RemoteControlManager {
       return undefined;
     }
     const text = formatTaskCompleted(this.repository, payload);
+    const links = await this.getLinks(payload.issueNumber, { prUrl: payload.prUrl, prNumber: payload.prNumber });
     return this.provider.sendMessage(text, {
       chatId: chatId ?? this.defaultChatId,
       parseMode: 'Markdown',
+      actions: [
+        buildLinkRow(payload.issueNumber, links),
+        [navButton('📋 Tasks', { view: 'tasks' }), navButton('🏠 Menu', { view: 'menu' })],
+      ].filter((r) => r.length > 0),
     });
   }
 
@@ -376,9 +455,14 @@ export class RemoteControlManager {
       return undefined;
     }
     const text = formatSpecCompleted(this.repository, payload);
+    const specUrl = this.issueUrlFor(payload.specNumber);
     return this.provider.sendMessage(text, {
       chatId: chatId ?? this.defaultChatId,
       parseMode: 'Markdown',
+      actions: [
+        specUrl ? [urlButton(`🔗 Spec #${payload.specNumber}`, specUrl)] : [],
+        [navButton('🎯 Specs', { view: 'specs' }), navButton('🏠 Menu', { view: 'menu' })],
+      ].filter((r) => r.length > 0),
     });
   }
 
@@ -414,17 +498,12 @@ export class RemoteControlManager {
         }
       }
 
-      const ghUrl = payload.issueUrl || payload.prUrl || (this.repository ? `https://github.com/${this.repository}/issues/${payload.issueNumber}` : undefined);
-      if (ghUrl) {
-        generatedActions.push([
-          {
-            id: `gh_${payload.issueNumber}`,
-            label: '🔗 Open on GitHub',
-            payload: '',
-            url: ghUrl,
-          },
-        ]);
-      }
+      const links = await this.getLinks(payload.issueNumber, {
+        issueUrl: payload.issueUrl,
+        prUrl: payload.prUrl,
+        prNumber: payload.prNumber,
+      });
+      generatedActions.push(...this.needsInfoFollowUpRows(payload.issueNumber, links));
 
       if (generatedActions.length > 0) {
         actions = generatedActions;
@@ -492,7 +571,7 @@ export class RemoteControlManager {
       try {
         await this.provider.editMessage(activeInfo.messageId, updatedText, {
           chatId: activeInfo.chatId ?? this.defaultChatId,
-          actions: [],
+          actions: await this.answeredNeedsInfoRows(activeInfo.payload),
         });
       } catch (err: any) {
         ActivityLogger.error(`RemoteControlManager: failed to edit message #${activeInfo.messageId}:`, err);
@@ -528,7 +607,7 @@ export class RemoteControlManager {
       try {
         await this.provider.editMessage(activeInfo.messageId, updatedText, {
           chatId: activeInfo.chatId ?? this.defaultChatId,
-          actions: [],
+          actions: await this.answeredNeedsInfoRows(activeInfo.payload),
         });
       } catch (err: any) {
         ActivityLogger.error(`RemoteControlManager: failed to edit message #${activeInfo.messageId}:`, err);
@@ -569,6 +648,7 @@ export class RemoteControlManager {
           payload: buildQuotaResumeCallbackData(payload.runnerName),
         },
       ],
+      [navButton('⚙️ Limits', { view: 'limits' }), navButton('📊 Status', { view: 'status' })],
     ];
 
     return this.provider.sendMessage(text, {
@@ -589,6 +669,7 @@ export class RemoteControlManager {
     return this.provider.sendMessage(text, {
       chatId: chatId ?? this.defaultChatId,
       parseMode: 'Markdown',
+      actions: [[navButton('📊 Status', { view: 'status' }), navButton('📋 Tasks', { view: 'tasks' })]],
     });
   }
 
@@ -635,7 +716,7 @@ export class RemoteControlManager {
         await this.provider.editMessage(context.messageId, updatedText, {
           chatId: context.chatId ?? this.defaultChatId,
           parseMode: 'Markdown',
-          actions: [],
+          actions: [[navButton('📊 Status', { view: 'status' }), navButton('🏠 Menu', { view: 'menu' })]],
         });
       } catch (err: any) {
         ActivityLogger.error('Failed to edit message inline on quota resume:', err);
@@ -689,78 +770,411 @@ export class RemoteControlManager {
     await this.sendQuotaResumed(payload);
   }
 
-  public async handleStatusCommand(
-    _args: string[],
-    _userId: number,
-    context?: ActionContext
-  ): Promise<void> {
-    const summary = (this.actionController?.getStatusSummary() || {}) as any;
-    const text = formatStatus(this.repository, summary);
-    await this.provider.sendMessage(text, {
-      chatId: context?.chatId ?? this.defaultChatId,
-      parseMode: 'Markdown',
-    });
+  // ---------------------------------------------------------------------------------------------------
+  // Shared helpers
+  // ---------------------------------------------------------------------------------------------------
+
+  private chatOf(context?: ActionContext): number | string | undefined {
+    return context?.chatId ?? this.defaultChatId;
   }
 
-  public async handleTasksCommand(
-    _args: string[],
-    _userId: number,
-    context?: ActionContext
-  ): Promise<void> {
-    let tasksData: TasksSummary;
-    if (this.actionController?.getTasksSummary) {
-      tasksData = this.actionController.getTasksSummary();
-    } else {
-      const summary = (this.actionController?.getStatusSummary() || {}) as any;
-      const activeWorkers = summary.activeWorkers || summary.workers || [];
-      const inProgress = activeWorkers.filter((w: any) => w.status === 'running');
-      const paused = activeWorkers.filter((w: any) => w.status === 'paused_quota' || w.status === 'paused');
-      tasksData = {
-        inProgress,
-        paused,
-        queued: [],
-      };
-    }
+  private issueUrlFor(issueNumber: number): string | undefined {
+    const repo = this.issueRepository ?? this.repository;
+    return repo ? `https://github.com/${repo}/issues/${issueNumber}` : undefined;
+  }
 
-    const { text, actions } = formatTasks(this.repository, tasksData);
-    await this.provider.sendMessage(text, {
-      chatId: context?.chatId ?? this.defaultChatId,
+  /** Links for an issue, preferring what the caller already knows over a lookup. */
+  private async getLinks(issueNumber: number, known: Partial<IssueLinks> = {}): Promise<IssueLinks> {
+    let looked: IssueLinks = {};
+    if (!known.prUrl && this.actionController?.getIssueLinks) {
+      try {
+        looked = await this.actionController.getIssueLinks(issueNumber);
+      } catch {
+        // Links are a convenience: a failed lookup leaves them out
+      }
+    }
+    return {
+      issueUrl: known.issueUrl ?? looked.issueUrl ?? this.issueUrlFor(issueNumber),
+      prUrl: known.prUrl ?? looked.prUrl,
+      prNumber: known.prNumber ?? looked.prNumber,
+      prState: known.prUrl ? undefined : looked.prState,
+    };
+  }
+
+  private getIssueState(issueNumber: number): IssueRunState | undefined {
+    try {
+      return this.actionController?.getIssueState?.(issueNumber);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private getTasks(): TasksSummary | undefined {
+    return this.actionController?.getTasksSummary ? this.actionController.getTasksSummary() : undefined;
+  }
+
+  private pickerItems(tasks?: TasksSummary, includeQueued: boolean = true): PickerItem[] {
+    return [
+      ...(tasks?.inProgress ?? []).map((t) => ({ issueNumber: t.issueNumber, title: t.title, state: 'running' })),
+      ...(tasks?.paused ?? []).map((t) => ({ issueNumber: t.issueNumber, title: t.title, state: 'paused' })),
+      ...(includeQueued ? (tasks?.queued ?? []) : []).map((t) => ({ issueNumber: t.issueNumber, title: t.title, state: 'queued' })),
+    ];
+  }
+
+  /** Buttons for a message about one issue: what can be done with it next, and where it lives on GitHub. */
+  private async issueRows(
+    issueNumber: number,
+    current: 'inspect' | 'logs' | 'other',
+    known: Partial<IssueLinks> = {}
+  ): Promise<InteractiveAction[][]> {
+    const links = await this.getLinks(issueNumber, known);
+    return [
+      ...buildIssueControlRows(issueNumber, this.getIssueState(issueNumber), current),
+      buildLinkRow(issueNumber, links),
+    ].filter((r) => r.length > 0);
+  }
+
+  private needsInfoFollowUpRows(issueNumber: number, links: IssueLinks): InteractiveAction[][] {
+    return [
+      buildLinkRow(issueNumber, links),
+      [navButton('🔍 Inspect', { view: 'inspect', issueNumber }), navButton('📜 Logs', { view: 'logs', issueNumber })],
+    ].filter((r) => r.length > 0);
+  }
+
+  private async answeredNeedsInfoRows(payload: NeedsInfoNotificationPayload): Promise<InteractiveAction[][]> {
+    const links = await this.getLinks(payload.issueNumber, {
+      issueUrl: payload.issueUrl,
+      prUrl: payload.prUrl,
+      prNumber: payload.prNumber,
+    });
+    return this.needsInfoFollowUpRows(payload.issueNumber, links);
+  }
+
+  /**
+   * Shows a view. `navigate` replaces the message the tapped button was on when that message is itself a
+   * view, so moving between views reads as navigation; a button on a notification opens a new view and
+   * leaves the notification in the chat. `replace` always edits, for dialogs such as a confirmation.
+   */
+  private async present(
+    view: View,
+    context?: ActionContext,
+    mode: 'send' | 'navigate' | 'replace' = 'send'
+  ): Promise<void> {
+    const text = clampText(view.text);
+    const actions = view.actions.filter((r) => r.length > 0);
+    const messageId = context?.messageId;
+    const edit =
+      messageId !== undefined && (mode === 'replace' || (mode === 'navigate' && this.viewMessageIds.has(messageId)));
+    if (edit) {
+      try {
+        await this.provider.editMessage(messageId, text, {
+          chatId: this.chatOf(context),
+          parseMode: 'Markdown',
+          actions,
+        });
+        this.trackView(messageId);
+        return;
+      } catch (err: any) {
+        ActivityLogger.error('RemoteControlManager: failed to update view in place, sending it instead:', err);
+      }
+    }
+    const sent = await this.provider.sendMessage(text, {
+      chatId: this.chatOf(context),
       parseMode: 'Markdown',
       actions: actions.length > 0 ? actions : undefined,
     });
+    if (sent?.messageId !== undefined) this.trackView(sent.messageId);
+  }
+
+  private trackView(messageId: number): void {
+    this.viewMessageIds.delete(messageId);
+    this.viewMessageIds.add(messageId);
+    if (this.viewMessageIds.size > MAX_TRACKED_VIEWS) {
+      const oldest = this.viewMessageIds.values().next().value;
+      if (oldest !== undefined) this.viewMessageIds.delete(oldest);
+    }
+  }
+
+  private withNotice(notice: string | undefined, text: string): string {
+    return notice ? `${notice}\n\n${text}` : text;
+  }
+
+  // ---------------------------------------------------------------------------------------------------
+  // Views
+  // ---------------------------------------------------------------------------------------------------
+
+  private renderMenu(): View {
+    const summary = (this.actionController?.getStatusSummary() || {}) as any;
+    const limits = this.actionController?.getQuotaLimits?.();
+    return { text: formatMenu(this.repository, summary, limits), actions: buildMainMenuRows() };
+  }
+
+  private renderStatus(notice?: string): View {
+    const summary = (this.actionController?.getStatusSummary() || {}) as any;
+    const workers: Array<{ issueNumber: number; title?: string; status?: string }> =
+      summary.activeWorkers || summary.workers || [];
+    const actions: InteractiveAction[][] = [
+      ...buildIssuePickerRows(
+        workers.map((w) => ({
+          issueNumber: w.issueNumber,
+          title: w.title,
+          state: w.status === 'paused_quota' ? 'paused' : 'running',
+        })),
+        'inspect',
+        6
+      ),
+    ];
+    const controls: InteractiveAction[] = [];
+    if (summary.quota?.isPaused) {
+      controls.push(actionButton('⚡ Resume quota', { action: 'qresume' }));
+    }
+    controls.push(
+      summary.isDispatchingPaused || summary.isSessionStarted === false
+        ? actionButton('▶️ Resume dispatch', { action: 'dresume' })
+        : actionButton('⏸️ Pause dispatch', { action: 'dpause' })
+    );
+    actions.push(controls);
+    actions.push([
+      navButton('📋 Tasks', { view: 'tasks' }),
+      navButton('⚙️ Limits', { view: 'limits' }),
+      actionButton('🧹 Clean', { action: 'clean' }),
+    ]);
+    actions.push(buildFooterRow({ refresh: { view: 'status' } }));
+    return { text: this.withNotice(notice, formatStatus(this.repository, summary)), actions };
+  }
+
+  private renderTasks(notice?: string): View {
+    let tasksData = this.getTasks();
+    if (!tasksData) {
+      const summary = (this.actionController?.getStatusSummary() || {}) as any;
+      const activeWorkers = summary.activeWorkers || summary.workers || [];
+      tasksData = {
+        inProgress: activeWorkers.filter((w: any) => w.status === 'running'),
+        paused: activeWorkers.filter((w: any) => w.status === 'paused_quota' || w.status === 'paused'),
+        queued: [],
+      };
+    }
+    const { text, actions } = formatTasks(this.repository, tasksData);
+    return {
+      text: this.withNotice(notice, text),
+      actions: [...actions, buildFooterRow({ refresh: { view: 'tasks' } })],
+    };
+  }
+
+  private renderSpecs(notice?: string): View {
+    let specsData: SpecsSummary;
+    if (this.actionController?.getSpecsSummary) {
+      specsData = this.actionController.getSpecsSummary();
+    } else {
+      const summary = (this.actionController?.getStatusSummary() || {}) as any;
+      specsData = { targetSpecs: summary.targetSpecs || [], specs: summary.allSpecs || [] };
+    }
+    const { text, actions } = formatSpecs(this.repository, specsData);
+    return { text: this.withNotice(notice, text), actions: [...actions, buildFooterRow()] };
+  }
+
+  private renderBrowse(page: number): View {
+    const { text, actions } = formatBrowse(this.repository, this.getBrowseIssues(), { page });
+    return { text, actions: [...actions, buildFooterRow()] };
+  }
+
+  private renderHelp(userId: number): View {
+    const allowedUserIds = this.provider.getAllowedUserIds?.();
+    const whitelistStatus =
+      allowedUserIds && allowedUserIds.length > 0
+        ? `Enabled (${allowedUserIds.length} allowed user${allowedUserIds.length === 1 ? '' : 's'})`
+        : 'Disabled (Open to all)';
+    const securityInfo: SecurityStatusInfo = {
+      userId,
+      isAuthorized: true,
+      whitelistStatus,
+      allowedUserCount: allowedUserIds?.length,
+    };
+    const inProgress = this.getTasks()?.inProgress;
+    const text = formatHelp(this.repository, securityInfo, inProgress);
+    const workerRows = (inProgress ?? []).slice(0, 4).map((w) => [
+      navButton(`🔍 #${w.issueNumber}`, { view: 'inspect', issueNumber: w.issueNumber }),
+      actionButton(`🧭 Steer #${w.issueNumber}`, { action: 'steer', issueNumber: w.issueNumber }),
+      actionButton(`⏸️ #${w.issueNumber}`, { action: 'pause', issueNumber: w.issueNumber }),
+    ]);
+    return { text, actions: [...workerRows, ...buildMainMenuRows().slice(0, 4)] };
+  }
+
+  private renderLimits(notice?: string): View {
+    const limits = this.actionController?.getQuotaLimits?.();
+    if (!limits) {
+      return {
+        text: `${formatRepoTag(this.repository)}⚠️ Usage limits are not available from the active controller.`,
+        actions: [buildFooterRow()],
+      };
+    }
+    return {
+      text: formatLimits(this.repository, limits, notice),
+      actions: [
+        ...buildLimitAdjustRows(limits.fiveHourPercent, limits.weeklyPercent),
+        buildFooterRow({ refresh: { view: 'limits' } }),
+      ],
+    };
+  }
+
+  private renderInspectPicker(): View {
+    const tasks = this.getTasks();
+    const text = formatInspectHelp(this.repository, {
+      inProgress: tasks?.inProgress,
+      paused: tasks?.paused,
+      queued: tasks?.queued,
+    });
+    return {
+      text,
+      actions: [...buildIssuePickerRows(this.pickerItems(tasks), 'inspect'), buildFooterRow({ refresh: { view: 'inspect' } })],
+    };
+  }
+
+  private renderLogsPicker(): View {
+    const tasks = this.getTasks();
+    const text = formatLogsHelp(this.repository, {
+      inProgress: tasks?.inProgress,
+      paused: tasks?.paused,
+      queued: tasks?.queued,
+    });
+    return {
+      text,
+      actions: [...buildIssuePickerRows(this.pickerItems(tasks), 'logs'), buildFooterRow({ refresh: { view: 'logs' } })],
+    };
+  }
+
+  private renderSteerPicker(): View {
+    const tasks = this.getTasks();
+    const text = formatSteerUsage(this.repository, tasks?.inProgress);
+    return {
+      text,
+      actions: [...buildIssuePickerRows(this.pickerItems(tasks, false), 'steer'), buildFooterRow()],
+    };
+  }
+
+  private async renderInspect(issueNumber: number, notice?: string): Promise<View | undefined> {
+    if (!this.actionController?.getInspectSummary) return undefined;
+    const details = await this.actionController.getInspectSummary(issueNumber);
+    return {
+      text: this.withNotice(notice, formatInspect(this.repository, issueNumber, details)),
+      actions: [
+        ...(await this.issueRows(issueNumber, 'inspect')),
+        buildFooterRow({ back: { view: 'inspect' }, refresh: { view: 'inspect', issueNumber } }),
+      ],
+    };
+  }
+
+  private async renderLogs(issueNumber: number): Promise<View | undefined> {
+    if (!this.actionController?.getLogsSummary) return undefined;
+    const logs = await this.actionController.getLogsSummary(issueNumber, LOGS_TAIL_LINES);
+    return {
+      text: formatLogs(this.repository, issueNumber, logs),
+      actions: [
+        ...(await this.issueRows(issueNumber, 'logs')),
+        buildFooterRow({ back: { view: 'logs' }, refresh: { view: 'logs', issueNumber } }),
+      ],
+    };
+  }
+
+  private async renderTarget(target: NavTarget, userId: number): Promise<View> {
+    switch (target.view) {
+      case 'menu':
+        return this.renderMenu();
+      case 'status':
+        return this.renderStatus();
+      case 'tasks':
+        return this.renderTasks();
+      case 'specs':
+        return this.renderSpecs();
+      case 'help':
+        return this.renderHelp(userId);
+      case 'limits':
+        return this.renderLimits();
+      case 'steer':
+        return this.renderSteerPicker();
+      case 'browse':
+        return this.renderBrowse(target.page);
+      case 'inspect':
+        if (target.issueNumber !== undefined) {
+          const view = await this.renderInspect(target.issueNumber);
+          if (view) return view;
+        }
+        return this.renderInspectPicker();
+      case 'logs':
+        if (target.issueNumber !== undefined) {
+          const view = await this.renderLogs(target.issueNumber);
+          if (view) return view;
+        }
+        return this.renderLogsPicker();
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------------
+  // Commands
+  // ---------------------------------------------------------------------------------------------------
+
+  public async handleMenuCommand(_args: string[], _userId: number, context?: ActionContext): Promise<void> {
+    await this.present(this.renderMenu(), context);
+  }
+
+  public async handleStatusCommand(_args: string[], _userId: number, context?: ActionContext): Promise<void> {
+    await this.present(this.renderStatus(), context);
+  }
+
+  public async handleTasksCommand(_args: string[], _userId: number, context?: ActionContext): Promise<void> {
+    await this.present(this.renderTasks(), context);
   }
 
   private getBrowseIssues(): BrowseIssueSummary[] {
     return this.actionController?.getBrowseIssues ? this.actionController.getBrowseIssues() : [];
   }
 
-  public async handleBrowseCommand(
-    args: string[],
-    _userId: number,
-    context?: ActionContext
-  ): Promise<void> {
+  public async handleBrowseCommand(args: string[], _userId: number, context?: ActionContext): Promise<void> {
     const page = parseInt(args[0], 10);
-    const { text, actions } = formatBrowse(this.repository, this.getBrowseIssues(), {
-      page: isNaN(page) ? 1 : page,
-    });
-    await this.provider.sendMessage(text, {
-      chatId: context?.chatId ?? this.defaultChatId,
-      parseMode: 'Markdown',
-      actions: actions.length > 0 ? actions : undefined,
-    });
+    await this.present(this.renderBrowse(isNaN(page) ? 1 : page), context);
   }
 
-  public async handleEnqueueCommand(
-    args: string[],
-    _userId: number,
-    context?: ActionContext
-  ): Promise<void> {
+  public async handleLimitsCommand(args: string[], _userId: number, context?: ActionContext): Promise<void> {
     if (args.length === 0) {
-      const summary = this.actionController?.getTasksSummary ? this.actionController.getTasksSummary() : undefined;
-      await this.provider.sendMessage(formatEnqueueUsage(this.repository, { queued: summary?.queued }), {
-        chatId: context?.chatId ?? this.defaultChatId,
-        parseMode: 'Markdown',
-      });
+      await this.present(this.renderLimits(), context);
+      return;
+    }
+    const parsed = parseLimitArgs(args);
+    if (parsed.error) {
+      await this.present(this.renderLimits(`⚠️ ${parsed.error}`), context);
+      return;
+    }
+    await this.present(await this.applyLimits(parsed), context);
+  }
+
+  private async applyLimits(limits: { fiveHourPercent?: number; weeklyPercent?: number }): Promise<View> {
+    if (!this.actionController?.updateQuotaLimits) {
+      return this.renderLimits('⚠️ Changing limits is not supported by the active controller.');
+    }
+    try {
+      const result = await this.actionController.updateQuotaLimits(limits);
+      return this.renderLimits(`✅ ${escapeMarkdown(result.message)} Saved to config.`);
+    } catch (err: any) {
+      return this.renderLimits(`⚠️ Failed to update limits: ${escapeMarkdown(err?.message || String(err))}`);
+    }
+  }
+
+  public async handleEnqueueCommand(args: string[], _userId: number, context?: ActionContext): Promise<void> {
+    if (args.length === 0) {
+      const summary = this.getTasks();
+      await this.present(
+        {
+          text: formatEnqueueUsage(this.repository, { queued: summary?.queued }),
+          actions: [
+            ...(summary?.queued ?? []).slice(0, 5).map((q) => [
+              actionButton(`⚡ Run #${q.issueNumber} now`, { action: 'now', issueNumber: q.issueNumber }),
+              navButton(`🔍 #${q.issueNumber}`, { view: 'inspect', issueNumber: q.issueNumber }),
+            ]),
+            buildFooterRow(),
+          ],
+        },
+        context
+      );
       return;
     }
 
@@ -769,40 +1183,39 @@ export class RemoteControlManager {
     if (unknownFlags.length > 0) {
       await this.provider.sendMessage(
         `⚠️ Unknown option(s): ${unknownFlags.map((f) => `\`${f}\``).join(', ')}.\n\n*Usage*: \`${ENQUEUE_USAGE}\``,
-        {
-          chatId: context?.chatId ?? this.defaultChatId,
-          parseMode: 'Markdown',
-        }
+        { chatId: this.chatOf(context), parseMode: 'Markdown' }
       );
       return;
     }
 
     if (parsedIssueNumber === undefined) {
-      const summary = this.actionController?.getTasksSummary ? this.actionController.getTasksSummary() : undefined;
-      const text = formatEnqueueUsage(this.repository, { queued: summary?.queued });
-      await this.provider.sendMessage(text, {
-        chatId: context?.chatId ?? this.defaultChatId,
+      const summary = this.getTasks();
+      await this.provider.sendMessage(formatEnqueueUsage(this.repository, { queued: summary?.queued }), {
+        chatId: this.chatOf(context),
         parseMode: 'Markdown',
       });
       return;
     }
 
-    const issueNumber = parsedIssueNumber;
-
     if (!this.actionController?.enqueueTask) {
-      await this.provider.sendMessage(
-        '⚠️ Enqueue action is not supported by the current controller.',
-        {
-          chatId: context?.chatId ?? this.defaultChatId,
-          parseMode: 'Markdown',
-        }
-      );
+      await this.provider.sendMessage('⚠️ Enqueue action is not supported by the current controller.', {
+        chatId: this.chatOf(context),
+        parseMode: 'Markdown',
+      });
       return;
     }
 
-    const result = await this.actionController.enqueueTask(issueNumber, { force, now, runner });
+    await this.present(await this.enqueueView(parsedIssueNumber, { force, now, runner }), context);
+  }
 
-    if (result.requiresConfirmation && !force) {
+  // Runs an enqueue and shows either the confirmation it needs or its outcome with what to do next.
+  private async enqueueView(
+    issueNumber: number,
+    options: { force?: boolean; now?: boolean; runner?: string }
+  ): Promise<View> {
+    const result = await this.actionController!.enqueueTask!(issueNumber, options);
+
+    if (result.requiresConfirmation && !options.force) {
       const { text, actions } = formatEnqueueConfirmation(this.repository, {
         issueNumber,
         message: result.message,
@@ -811,32 +1224,22 @@ export class RemoteControlManager {
         isSpec: result.isSpec,
         isClosed: result.isClosed,
       });
-
-      await this.provider.sendMessage(text, {
-        chatId: context?.chatId ?? this.defaultChatId,
-        parseMode: 'Markdown',
-        actions,
-      });
-      return;
+      const links = await this.getLinks(issueNumber);
+      return { text, actions: [...actions, buildLinkRow(issueNumber, links)] };
     }
 
-    const text = formatEnqueueResult(this.repository, {
-      success: result.success,
-      message: result.message,
-      issueNumber,
-    });
-
-    await this.provider.sendMessage(text, {
-      chatId: context?.chatId ?? this.defaultChatId,
-      parseMode: 'Markdown',
-    });
+    const text = formatEnqueueResult(this.repository, { success: result.success, message: result.message, issueNumber });
+    const links = await this.getLinks(issueNumber);
+    return {
+      text,
+      actions: [
+        [navButton(`🔍 Inspect #${issueNumber}`, { view: 'inspect', issueNumber }), navButton('📋 Tasks', { view: 'tasks' })],
+        buildLinkRow(issueNumber, links),
+      ],
+    };
   }
 
-  public async handleSteerCommand(
-    args: string[],
-    _userId: number,
-    context?: ActionContext
-  ): Promise<void> {
+  public async handleSteerCommand(args: string[], _userId: number, context?: ActionContext): Promise<void> {
     let issueNumber: number | undefined;
     let promptText = '';
 
@@ -850,37 +1253,29 @@ export class RemoteControlManager {
       }
     }
 
-    const summary = this.actionController?.getTasksSummary ? this.actionController.getTasksSummary() : undefined;
+    const summary = this.getTasks();
 
     if (!issueNumber) {
       const inProgress = summary?.inProgress || [];
       if (inProgress.length === 1 && promptText) {
         issueNumber = inProgress[0].issueNumber;
       } else {
-        const text = formatSteerUsage(this.repository, inProgress);
-        await this.provider.sendMessage(text, {
-          chatId: context?.chatId ?? this.defaultChatId,
-          parseMode: 'Markdown',
-        });
+        await this.present(this.renderSteerPicker(), context);
         return;
       }
     }
 
     if (!promptText) {
-      const text = formatSteerUsage(this.repository, summary?.inProgress);
-      await this.provider.sendMessage(text, {
-        chatId: context?.chatId ?? this.defaultChatId,
-        parseMode: 'Markdown',
-      });
+      await this.sendSteerPrompt(issueNumber, context);
       return;
     }
 
     if (!this.actionController?.injectPrompt) {
       const repoTag = formatRepoTag(this.repository);
-      await this.provider.sendMessage(
-        `${repoTag}⚠️ Steering is not supported by the active controller.`,
-        { chatId: context?.chatId ?? this.defaultChatId, parseMode: 'Markdown' }
-      );
+      await this.provider.sendMessage(`${repoTag}⚠️ Steering is not supported by the active controller.`, {
+        chatId: this.chatOf(context),
+        parseMode: 'Markdown',
+      });
       return;
     }
 
@@ -902,9 +1297,11 @@ export class RemoteControlManager {
       waitTimeSeconds: waitSeconds,
     });
 
+    const links = await this.getLinks(issueNumber);
     await this.provider.sendMessage(immediateText, {
-      chatId: context?.chatId ?? this.defaultChatId,
+      chatId: this.chatOf(context),
       parseMode: 'Markdown',
+      actions: [buildLinkRow(issueNumber, links)].filter((r) => r.length > 0),
     });
 
     if (!result.success) {
@@ -912,6 +1309,7 @@ export class RemoteControlManager {
     }
 
     // 2. Schedule 8-second live tail observation report
+    const steeredIssue = issueNumber;
     setTimeout(async () => {
       try {
         let reportData: {
@@ -922,16 +1320,12 @@ export class RemoteControlManager {
           runnerName?: string;
           events: Array<{ timestamp: string; summary: string; type: string }>;
           diffStat?: string;
-        } = {
-          issueNumber: issueNumber!,
-          prompt: promptText,
-          events: [],
-        };
+        } = { issueNumber: steeredIssue, prompt: promptText, events: [] };
 
         if (this.actionController?.getLiveTailReport) {
-          const liveTail = await this.actionController.getLiveTailReport(issueNumber!, startTime);
+          const liveTail = await this.actionController.getLiveTailReport(steeredIssue, startTime);
           reportData = {
-            issueNumber: issueNumber!,
+            issueNumber: steeredIssue,
             prompt: promptText,
             status: liveTail.status,
             branchName: liveTail.branchName,
@@ -942,36 +1336,65 @@ export class RemoteControlManager {
         }
 
         const reportText = formatSteeringLiveTailReport(this.repository, reportData);
-        await this.provider.sendMessage(reportText, {
-          chatId: context?.chatId ?? this.defaultChatId,
+        const msg = await this.provider.sendMessage(reportText, {
+          chatId: this.chatOf(context),
           parseMode: 'Markdown',
+          actions: [
+            [
+              actionButton('🧭 Steer again', { action: 'steer', issueNumber: steeredIssue }),
+              navButton('🔍 Inspect', { view: 'inspect', issueNumber: steeredIssue }),
+            ],
+            buildLinkRow(steeredIssue, links),
+          ].filter((r) => r.length > 0),
         });
+        if (msg?.messageId) this.taskMessageMap.set(msg.messageId, steeredIssue);
       } catch (err: any) {
-        ActivityLogger.error(`RemoteControlManager: error sending live tail report for #${issueNumber}:`, err);
+        ActivityLogger.error(`RemoteControlManager: error sending live tail report for #${steeredIssue}:`, err);
       }
     }, waitSeconds * 1000);
   }
 
-  public async handlePauseCommand(
-    args: string[],
-    _userId: number,
-    context?: ActionContext
-  ): Promise<void> {
+  /** Asks for steering instructions; replying to the prompt steers the issue. */
+  private async sendSteerPrompt(issueNumber: number, context?: ActionContext): Promise<void> {
+    const title =
+      this.pickerItems(this.getTasks()).find((t) => t.issueNumber === issueNumber)?.title;
+    const msg = await this.provider.sendMessage(formatSteerPrompt(this.repository, issueNumber, title), {
+      chatId: this.chatOf(context),
+      parseMode: 'Markdown',
+      forceReply: { placeholder: `Instructions for #${issueNumber}` },
+    });
+    if (msg?.messageId) this.taskMessageMap.set(msg.messageId, issueNumber);
+  }
+
+  private async pauseOrResumeIssue(
+    action: 'pause' | 'resume',
+    issueNumber: number
+  ): Promise<{ success: boolean; message: string }> {
+    let result = {
+      success: true,
+      message: `${action === 'pause' ? 'Paused' : 'Resumed'} worker for Issue #${issueNumber}`,
+    };
+    const fn = action === 'pause' ? this.actionController?.pauseTask : this.actionController?.resumeTask;
+    if (fn) {
+      const res = await fn.call(this.actionController, issueNumber);
+      if (res && typeof res === 'object') result = res;
+    }
+    return result;
+  }
+
+  private async taskActionView(action: 'pause' | 'resume', issueNumber: number): Promise<View> {
+    const result = await this.pauseOrResumeIssue(action, issueNumber);
+    return {
+      text: formatTaskActionResponse(this.repository, action, issueNumber, result),
+      actions: [...(await this.issueRows(issueNumber, 'other')), [navButton('📋 Tasks', { view: 'tasks' })]],
+    };
+  }
+
+  public async handlePauseCommand(args: string[], _userId: number, context?: ActionContext): Promise<void> {
     if (args.length > 0) {
       const issueNum = parseInt(args[0].replace(/^#/, ''), 10);
       if (!isNaN(issueNum)) {
-        let result = { success: true, message: `Paused worker for Issue #${issueNum}` };
-        if (this.actionController?.pauseTask) {
-          const res = await this.actionController.pauseTask(issueNum);
-          if (res && typeof res === 'object') {
-            result = res;
-          }
-        }
-        const text = formatTaskActionResponse(this.repository, 'pause', issueNum, result);
-        await this.provider.sendMessage(text, {
-          chatId: context?.chatId ?? this.defaultChatId,
-          parseMode: 'Markdown',
-        });
+        await this.present(await this.taskActionView('pause', issueNum), context);
         return;
       }
     }
@@ -979,33 +1402,27 @@ export class RemoteControlManager {
     if (this.actionController?.pauseDispatching) {
       this.actionController.pauseDispatching();
     }
-    const text = formatDispatchPaused(this.repository);
-    await this.provider.sendMessage(text, {
-      chatId: context?.chatId ?? this.defaultChatId,
-      parseMode: 'Markdown',
-    });
+    await this.present(
+      {
+        text: formatDispatchPaused(this.repository),
+        actions: [
+          [actionButton('▶️ Resume dispatch', { action: 'dresume' }), navButton('📊 Status', { view: 'status' })],
+          ...buildIssuePickerRows(
+            (this.getTasks()?.inProgress ?? []).map((t) => ({ issueNumber: t.issueNumber, title: t.title, state: 'running' })),
+            'inspect',
+            4
+          ),
+        ],
+      },
+      context
+    );
   }
 
-  public async handleResumeCommand(
-    args: string[],
-    _userId: number,
-    context?: ActionContext
-  ): Promise<void> {
+  public async handleResumeCommand(args: string[], _userId: number, context?: ActionContext): Promise<void> {
     if (args.length > 0) {
       const issueNum = parseInt(args[0].replace(/^#/, ''), 10);
       if (!isNaN(issueNum)) {
-        let result = { success: true, message: `Resumed worker for Issue #${issueNum}` };
-        if (this.actionController?.resumeTask) {
-          const res = await this.actionController.resumeTask(issueNum);
-          if (res && typeof res === 'object') {
-            result = res;
-          }
-        }
-        const text = formatTaskActionResponse(this.repository, 'resume', issueNum, result);
-        await this.provider.sendMessage(text, {
-          chatId: context?.chatId ?? this.defaultChatId,
-          parseMode: 'Markdown',
-        });
+        await this.present(await this.taskActionView('resume', issueNum), context);
         return;
       }
     }
@@ -1013,29 +1430,26 @@ export class RemoteControlManager {
     if (this.actionController?.resumeDispatching) {
       this.actionController.resumeDispatching();
     }
-    const text = formatDispatchResumed(this.repository);
-    await this.provider.sendMessage(text, {
-      chatId: context?.chatId ?? this.defaultChatId,
-      parseMode: 'Markdown',
-    });
+    await this.present(
+      {
+        text: formatDispatchResumed(this.repository),
+        actions: [[navButton('📊 Status', { view: 'status' }), navButton('📋 Tasks', { view: 'tasks' })]],
+      },
+      context
+    );
   }
 
-  public async handleSpecsCommand(
-    args: string[],
-    _userId: number,
-    context?: ActionContext
-  ): Promise<void> {
+  public async handleSpecsCommand(args: string[], _userId: number, context?: ActionContext): Promise<void> {
     if (args.length > 0) {
       const firstArg = args[0].toLowerCase();
       if (['all', 'clear', 'reset', '0', 'none'].includes(firstArg)) {
         if (this.actionController?.setTargetSpecs) {
           this.actionController.setTargetSpecs([]);
         }
-        const text = formatSpecsUpdated(this.repository, []);
-        await this.provider.sendMessage(text, {
-          chatId: context?.chatId ?? this.defaultChatId,
-          parseMode: 'Markdown',
-        });
+        await this.present(
+          { text: formatSpecsUpdated(this.repository, []), actions: [[navButton('🎯 Specs', { view: 'specs' }), navButton('📋 Tasks', { view: 'tasks' })]] },
+          context
+        );
         return;
       }
 
@@ -1049,65 +1463,31 @@ export class RemoteControlManager {
         if (this.actionController?.setTargetSpecs) {
           this.actionController.setTargetSpecs(numbers);
         }
-        const text = formatSpecsUpdated(this.repository, numbers);
-        await this.provider.sendMessage(text, {
-          chatId: context?.chatId ?? this.defaultChatId,
-          parseMode: 'Markdown',
-        });
+        await this.present(
+          {
+            text: formatSpecsUpdated(this.repository, numbers),
+            actions: [
+              numbers
+                .slice(0, 4)
+                .map((n) => urlButton(`🔗 Spec #${n}`, this.issueUrlFor(n) ?? ''))
+                .filter((b) => b.url),
+              [navButton('🎯 Specs', { view: 'specs' }), navButton('📋 Tasks', { view: 'tasks' })],
+            ],
+          },
+          context
+        );
         return;
       }
     }
 
-    let specsData: SpecsSummary;
-    if (this.actionController?.getSpecsSummary) {
-      specsData = this.actionController.getSpecsSummary();
-    } else {
-      const summary = (this.actionController?.getStatusSummary() || {}) as any;
-      specsData = {
-        targetSpecs: summary.targetSpecs || [],
-        specs: summary.allSpecs || [],
-      };
-    }
-
-    const { text, actions } = formatSpecs(this.repository, specsData);
-    await this.provider.sendMessage(text, {
-      chatId: context?.chatId ?? this.defaultChatId,
-      parseMode: 'Markdown',
-      actions: actions.length > 0 ? actions : undefined,
-    });
+    await this.present(this.renderSpecs(), context);
   }
 
-  public async handleHelpCommand(
-    _args: string[],
-    userId: number,
-    context?: ActionContext
-  ): Promise<void> {
-    const allowedUserIds = this.provider.getAllowedUserIds?.();
-    const whitelistStatus =
-      allowedUserIds && allowedUserIds.length > 0
-        ? `Enabled (${allowedUserIds.length} allowed user${allowedUserIds.length === 1 ? '' : 's'})`
-        : 'Disabled (Open to all)';
-
-    const securityInfo: SecurityStatusInfo = {
-      userId,
-      isAuthorized: true,
-      whitelistStatus,
-      allowedUserCount: allowedUserIds?.length,
-    };
-
-    const summary = this.actionController?.getTasksSummary ? this.actionController.getTasksSummary() : undefined;
-    const text = formatHelp(this.repository, securityInfo, summary?.inProgress);
-    await this.provider.sendMessage(text, {
-      chatId: context?.chatId ?? this.defaultChatId,
-      parseMode: 'Markdown',
-    });
+  public async handleHelpCommand(_args: string[], userId: number, context?: ActionContext): Promise<void> {
+    await this.present(this.renderHelp(userId), context);
   }
 
-  public async handleCleanCommand(
-    _args: string[],
-    _userId: number,
-    context?: ActionContext
-  ): Promise<void> {
+  private async cleanNotice(): Promise<string> {
     let count = 0;
     if (this.actionController?.cleanWorktrees) {
       try {
@@ -1117,173 +1497,176 @@ export class RemoteControlManager {
         ActivityLogger.error('RemoteControlManager error executing cleanWorktrees:', err);
       }
     }
-    const text = formatCleanResult(this.repository, count);
-    await this.provider.sendMessage(text, {
-      chatId: context?.chatId ?? this.defaultChatId,
-      parseMode: 'Markdown',
-    });
+    return formatCleanResult(this.repository, count);
   }
 
-  public async handleInspectCommand(
-    args: string[],
-    _userId: number,
-    context?: ActionContext
-  ): Promise<void> {
-    const summary = this.actionController?.getTasksSummary ? this.actionController.getTasksSummary() : undefined;
+  public async handleCleanCommand(_args: string[], _userId: number, context?: ActionContext): Promise<void> {
+    await this.present(
+      {
+        text: await this.cleanNotice(),
+        actions: [[navButton('📊 Status', { view: 'status' }), navButton('🏠 Menu', { view: 'menu' })]],
+      },
+      context
+    );
+  }
 
+  public async handleInspectCommand(args: string[], _userId: number, context?: ActionContext): Promise<void> {
     if (args.length > 0) {
       const issueNum = parseInt(args[0].replace(/^#/, ''), 10);
-      if (!isNaN(issueNum) && this.actionController?.getInspectSummary) {
+      if (!isNaN(issueNum)) {
         try {
-          const details = await this.actionController.getInspectSummary(issueNum);
-          const text = formatInspect(this.repository, issueNum, details);
-          await this.provider.sendMessage(text, {
-            chatId: context?.chatId ?? this.defaultChatId,
-            parseMode: 'Markdown',
-          });
-          return;
+          const view = await this.renderInspect(issueNum);
+          if (view) {
+            await this.present(view, context);
+            return;
+          }
         } catch (err: any) {
           ActivityLogger.error(`RemoteControlManager error executing getInspectSummary for #${issueNum}:`, err);
         }
       }
     }
-
-    const text = formatInspectHelp(this.repository, {
-      inProgress: summary?.inProgress,
-      paused: summary?.paused,
-      queued: summary?.queued,
-    });
-    await this.provider.sendMessage(text, {
-      chatId: context?.chatId ?? this.defaultChatId,
-      parseMode: 'Markdown',
-    });
+    await this.present(this.renderInspectPicker(), context);
   }
 
-  public async handleLogsCommand(
-    args: string[],
-    _userId: number,
-    context?: ActionContext
-  ): Promise<void> {
-    const summary = this.actionController?.getTasksSummary ? this.actionController.getTasksSummary() : undefined;
-
+  public async handleLogsCommand(args: string[], _userId: number, context?: ActionContext): Promise<void> {
     if (args.length > 0) {
       const issueNum = parseInt(args[0].replace(/^#/, ''), 10);
-      if (!isNaN(issueNum) && this.actionController?.getLogsSummary) {
+      if (!isNaN(issueNum)) {
         try {
-          const logs = await this.actionController.getLogsSummary(issueNum, 30);
-          const text = formatLogs(this.repository, issueNum, logs);
-          await this.provider.sendMessage(text, {
-            chatId: context?.chatId ?? this.defaultChatId,
-            parseMode: 'Markdown',
-          });
-          return;
+          const view = await this.renderLogs(issueNum);
+          if (view) {
+            await this.present(view, context);
+            return;
+          }
         } catch (err: any) {
           ActivityLogger.error(`RemoteControlManager error executing getLogsSummary for #${issueNum}:`, err);
         }
       }
     }
-
-    const text = formatLogsHelp(this.repository, {
-      inProgress: summary?.inProgress,
-      paused: summary?.paused,
-      queued: summary?.queued,
-    });
-    await this.provider.sendMessage(text, {
-      chatId: context?.chatId ?? this.defaultChatId,
-      parseMode: 'Markdown',
-    });
+    await this.present(this.renderLogsPicker(), context);
   }
 
-  public async handleTaskAction(
-    payload: string,
-    _userId: number,
-    context?: ActionContext
-  ): Promise<boolean> {
+  // ---------------------------------------------------------------------------------------------------
+  // Button callbacks
+  // ---------------------------------------------------------------------------------------------------
+
+  public async handleNavAction(payload: string, userId: number, context?: ActionContext): Promise<boolean> {
+    const target = parseNavCallbackData(payload);
+    if (!target) return false;
+    try {
+      await this.present(await this.renderTarget(target, userId), context, 'navigate');
+    } catch (err: any) {
+      ActivityLogger.error(`RemoteControlManager: failed to open view "${payload}":`, err);
+      return false;
+    }
+    return true;
+  }
+
+  public async handleIssueOrDaemonAction(payload: string, _userId: number, context?: ActionContext): Promise<boolean> {
+    const target = parseActionCallbackData(payload);
+    if (!target) return false;
+
+    try {
+      switch (target.action) {
+        case 'steer':
+          await this.sendSteerPrompt(target.issueNumber, context);
+          return true;
+        case 'pause':
+        case 'resume': {
+          const result = await this.pauseOrResumeIssue(target.action, target.issueNumber);
+          const notice = formatTaskActionResponse(this.repository, target.action, target.issueNumber, result);
+          const view = await this.renderInspect(target.issueNumber, notice);
+          await this.present(view ?? (await this.taskActionView(target.action, target.issueNumber)), context, 'navigate');
+          return true;
+        }
+        case 'enqueue':
+        case 'now': {
+          if (!this.actionController?.enqueueTask) return false;
+          const view = await this.enqueueView(target.issueNumber, { now: target.action === 'now' });
+          await this.present(view, context, 'navigate');
+          return true;
+        }
+        case 'dpause': {
+          const res = this.actionController?.pauseDispatching?.();
+          await this.present(this.renderStatus(res ? `⏸️ ${res.message}` : undefined), context, 'navigate');
+          return true;
+        }
+        case 'dresume': {
+          const res = this.actionController?.resumeDispatching?.();
+          await this.present(this.renderStatus(res ? `▶️ ${res.message}` : undefined), context, 'navigate');
+          return true;
+        }
+        case 'qresume': {
+          this.actionController?.resumeQuota(undefined);
+          await this.present(this.renderStatus('⚡ Quota pause cleared. Workers resumed.'), context, 'navigate');
+          return true;
+        }
+        case 'clean': {
+          const notice = await this.cleanNotice();
+          await this.present(this.renderStatus(notice), context, 'navigate');
+          return true;
+        }
+      }
+    } catch (err: any) {
+      ActivityLogger.error(`RemoteControlManager: action "${payload}" failed:`, err);
+    }
+    return false;
+  }
+
+  public async handleLimitAction(payload: string, _userId: number, context?: ActionContext): Promise<boolean> {
+    const parsed = parseLimitCallbackData(payload);
+    if (!parsed) return false;
+    const view = await this.applyLimits(
+      parsed.window === 'h' ? { fiveHourPercent: parsed.percent } : { weeklyPercent: parsed.percent }
+    );
+    await this.present(view, context, 'navigate');
+    return true;
+  }
+
+  public async handleTaskAction(payload: string, _userId: number, context?: ActionContext): Promise<boolean> {
     const parsed = parseTaskActionPayload(payload);
     if (!parsed) return false;
 
-    let result = { success: true, message: `Task #${parsed.issueNumber} ${parsed.action}d` };
-    if (parsed.action === 'pause' && this.actionController?.pauseTask) {
-      const res = await this.actionController.pauseTask(parsed.issueNumber);
-      if (res && typeof res === 'object') {
-        result = res;
-      }
-    } else if (parsed.action === 'resume' && this.actionController?.resumeTask) {
-      const res = await this.actionController.resumeTask(parsed.issueNumber);
-      if (res && typeof res === 'object') {
-        result = res;
-      }
-    }
+    const result = await this.pauseOrResumeIssue(parsed.action, parsed.issueNumber);
 
     if (context?.messageId && this.actionController?.getTasksSummary) {
-      const updatedTasks = this.actionController.getTasksSummary();
-      const { text, actions } = formatTasks(this.repository, updatedTasks);
-      try {
-        await this.provider.editMessage(context.messageId, text, {
-          chatId: context.chatId ?? this.defaultChatId,
-          parseMode: 'Markdown',
-          actions: actions.length > 0 ? actions : [],
-        });
-      } catch (err: any) {
-        ActivityLogger.error('RemoteControlManager: failed to edit tasks message inline:', err);
-      }
+      const notice = formatTaskActionResponse(this.repository, parsed.action, parsed.issueNumber, result);
+      await this.present(this.renderTasks(notice), context, 'replace');
     } else {
-      const text = formatTaskActionResponse(this.repository, parsed.action, parsed.issueNumber, result);
-      await this.provider.sendMessage(text, {
-        chatId: context?.chatId ?? this.defaultChatId,
-        parseMode: 'Markdown',
-      });
+      await this.present(
+        {
+          text: formatTaskActionResponse(this.repository, parsed.action, parsed.issueNumber, result),
+          actions: [...(await this.issueRows(parsed.issueNumber, 'other')), [navButton('📋 Tasks', { view: 'tasks' })]],
+        },
+        context
+      );
     }
 
     return true;
   }
 
-  public async handleSpecAction(
-    payload: string,
-    _userId: number,
-    context?: ActionContext
-  ): Promise<boolean> {
+  public async handleSpecAction(payload: string, _userId: number, context?: ActionContext): Promise<boolean> {
     const parsed = parseSpecActionPayload(payload);
     if (!parsed) return false;
 
-    if (parsed.action === 'all') {
-      if (this.actionController?.setTargetSpecs) {
-        this.actionController.setTargetSpecs([]);
-      }
-    } else if (parsed.action === 'set') {
-      if (this.actionController?.setTargetSpecs) {
-        this.actionController.setTargetSpecs(parsed.specNumbers);
-      }
+    if (this.actionController?.setTargetSpecs) {
+      this.actionController.setTargetSpecs(parsed.action === 'all' ? [] : parsed.specNumbers);
     }
 
     if (context?.messageId && this.actionController?.getSpecsSummary) {
-      const updatedSpecs = this.actionController.getSpecsSummary();
-      const { text, actions } = formatSpecs(this.repository, updatedSpecs);
-      try {
-        await this.provider.editMessage(context.messageId, text, {
-          chatId: context.chatId ?? this.defaultChatId,
-          parseMode: 'Markdown',
-          actions: actions.length > 0 ? actions : [],
-        });
-      } catch (err: any) {
-        ActivityLogger.error('RemoteControlManager: failed to edit specs message inline:', err);
-      }
+      await this.present(this.renderSpecs(), context, 'replace');
     } else {
-      const updateText = formatSpecsUpdated(this.repository, parsed.specNumbers);
-      await this.provider.sendMessage(updateText, {
-        chatId: context?.chatId ?? this.defaultChatId,
+      await this.provider.sendMessage(formatSpecsUpdated(this.repository, parsed.specNumbers), {
+        chatId: this.chatOf(context),
         parseMode: 'Markdown',
+        actions: [[navButton('🎯 Specs', { view: 'specs' }), navButton('📋 Tasks', { view: 'tasks' })]],
       });
     }
 
     return true;
   }
 
-  public async handleEnqueueAction(
-    payload: string,
-    _userId: number,
-    context?: ActionContext
-  ): Promise<boolean> {
+  public async handleEnqueueAction(payload: string, _userId: number, context?: ActionContext): Promise<boolean> {
     const parsed = parseEnqueueActionPayload(payload);
     if (!parsed) return false;
 
@@ -1294,9 +1677,14 @@ export class RemoteControlManager {
             context.messageId,
             `❌ Enqueue for Issue #${parsed.issueNumber} was cancelled by developer.`,
             {
-              chatId: context.chatId ?? this.defaultChatId,
+              chatId: this.chatOf(context),
               parseMode: 'Markdown',
-              actions: [],
+              actions: [
+                [
+                  navButton(`🔍 Inspect #${parsed.issueNumber}`, { view: 'inspect', issueNumber: parsed.issueNumber }),
+                  navButton('📋 Tasks', { view: 'tasks' }),
+                ],
+              ],
             }
           );
         } catch (err: any) {
@@ -1310,65 +1698,17 @@ export class RemoteControlManager {
       if (!this.actionController?.enqueueTask) {
         return false;
       }
-
-      const result = await this.actionController.enqueueTask(parsed.issueNumber, { force: true });
-      const text = formatEnqueueResult(this.repository, {
-        success: result.success,
-        message: result.message,
-        issueNumber: parsed.issueNumber,
-      });
-
-      if (context?.messageId) {
-        try {
-          await this.provider.editMessage(context.messageId, text, {
-            chatId: context.chatId ?? this.defaultChatId,
-            parseMode: 'Markdown',
-            actions: [],
-          });
-        } catch (err: any) {
-          ActivityLogger.error('RemoteControlManager: failed to edit enqueue result message inline:', err);
-        }
-      } else {
-        await this.provider.sendMessage(text, {
-          chatId: context?.chatId ?? this.defaultChatId,
-          parseMode: 'Markdown',
-        });
-      }
-
+      await this.present(await this.enqueueView(parsed.issueNumber, { force: true }), context, 'replace');
       return true;
     }
 
     return false;
   }
 
-  public async handleBrowseAction(
-    payload: string,
-    _userId: number,
-    context?: ActionContext
-  ): Promise<boolean> {
+  public async handleBrowseAction(payload: string, _userId: number, context?: ActionContext): Promise<boolean> {
     const parsed = parseBrowseActionPayload(payload);
     if (!parsed) return false;
-
-    const { text, actions } = formatBrowse(this.repository, this.getBrowseIssues(), { page: parsed.page });
-
-    if (context?.messageId) {
-      try {
-        await this.provider.editMessage(context.messageId, text, {
-          chatId: context.chatId ?? this.defaultChatId,
-          parseMode: 'Markdown',
-          actions: actions.length > 0 ? actions : [],
-        });
-      } catch (err: any) {
-        ActivityLogger.error('RemoteControlManager: failed to edit browse page message inline:', err);
-      }
-    } else {
-      await this.provider.sendMessage(text, {
-        chatId: context?.chatId ?? this.defaultChatId,
-        parseMode: 'Markdown',
-        actions: actions.length > 0 ? actions : undefined,
-      });
-    }
-
+    await this.present(this.renderBrowse(parsed.page), context, 'replace');
     return true;
   }
 

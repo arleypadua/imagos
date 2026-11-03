@@ -156,7 +156,7 @@ describe('Orchestrator RemoteActionController & Quota Resumption', () => {
     // Message is edited inline with resumption notice and removed buttons
     expect(provider.editedMessages.length).toBe(1);
     expect(provider.editedMessages[0].text).toContain('▶️ Resumed by developer at');
-    expect(provider.editedMessages[0].options?.actions).toEqual([]);
+    expect(provider.editedMessages[0].options?.actions?.flat().map((b) => b.payload)).toEqual(['v1:n:status', 'v1:n:menu']);
 
     await manager.stop();
   });

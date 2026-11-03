@@ -373,6 +373,7 @@ describe('TelegramRemoteProvider', () => {
       const setMyCommandsCall = apiCalls.find((c) => c.method === 'setMyCommands');
       expect(setMyCommandsCall).toBeDefined();
       expect(setMyCommandsCall?.payload.commands).toEqual([
+        { command: 'menu', description: 'Main menu: navigate status, tasks, issues and settings' },
         { command: 'start', description: 'Show command reference and status' },
         { command: 'status', description: 'View active tasks, worktrees & DAG' },
         { command: 'tasks', description: 'List in-progress and queued tasks' },
@@ -386,6 +387,7 @@ describe('TelegramRemoteProvider', () => {
         { command: 'clean', description: 'Clean inactive worktrees and temp branches' },
         { command: 'inspect', description: 'Inspect active worker tool calls & diffs' },
         { command: 'logs', description: 'View recent daemon logs' },
+        { command: 'limits', description: 'View or change usage limits: /limits weekly 90 | /limits 5h 85' },
         { command: 'help', description: 'Show command reference and usage' },
       ]);
     });

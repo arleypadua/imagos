@@ -352,7 +352,7 @@ describe('Remote Message Formatters', () => {
         daemonStatus: 'paused_quota',
         quota: { isPaused: true, resetAt: new Date('2026-08-20T20:00:00Z'), pausedRunner: 'claude' },
       });
-      expect(pausedQuotaMsg).toContain('• *Health*: ⏸️ Paused (5h Quota Limit)');
+      expect(pausedQuotaMsg).toContain('• *Health*: ⏸️ Paused (Quota Limit)');
       expect(pausedQuotaMsg).toContain('• *Quota*: ⏳ Paused until');
 
       const pausedDispatchMsg = formatStatus('owner/repo', {
@@ -392,8 +392,10 @@ describe('Remote Message Formatters', () => {
       expect(text).toContain('⏳ *Queued Tasks*:');
       expect(text).toContain('• *#26* - feat: needs-info');
 
-      // Actions: 1 pause button for #24, 1 resume button for #25
-      expect(actions.length).toBe(2);
+      // Actions: pause #24, resume #25, run #26 now — each beside an inspect button
+      expect(actions.length).toBe(3);
+      expect(actions[0][1].payload).toBe('v1:n:inspect:24');
+      expect(actions[2][0].payload).toBe('v1:a:now:26');
       expect(actions[0][0].label).toBe('⏸️ Pause #24');
       expect(actions[0][0].payload).toBe('v1:t:pause:24');
       expect(actions[1][0].label).toBe('▶️ Resume #25');

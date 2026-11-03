@@ -185,7 +185,10 @@ describe('Remote Control Enqueue Command & Callbacks', () => {
     expect(mockController.enqueueTask).toHaveBeenCalledWith(88, expect.objectContaining({ force: true }));
     expect(provider.sentMessages.length).toBe(1);
     expect(provider.sentMessages[0].text).toContain('Priority Enqueued');
-    expect(provider.sentMessages[0].options?.actions).toBeUndefined();
+    // No confirmation buttons: only follow-ups to the enqueued issue
+    const payloads = provider.sentMessages[0].options?.actions?.flat().map((b) => b.payload) ?? [];
+    expect(payloads).not.toContain('v1:enq:88:f');
+    expect(payloads).toContain('v1:n:inspect:88');
   });
 
   it('executes force enqueue on callback button press (v1:enq:88:f)', async () => {

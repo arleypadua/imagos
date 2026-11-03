@@ -22,6 +22,8 @@ export interface RemoteMessageOptions {
   parseMode?: 'MarkdownV2' | 'Markdown' | 'HTML';
   actions?: InteractiveAction[][]; // Rows of inline keyboard buttons
   replyToMessageId?: number;
+  /** Opens the reply box so the next text the person sends answers this message. Ignored with `actions`. */
+  forceReply?: { placeholder?: string };
 }
 
 export interface RemoteControlProvider {
@@ -163,7 +165,39 @@ export interface IssueTreeSummary {
   readyIssueNumbers: number[];
 }
 
+export interface IssueLinks {
+  issueUrl?: string;
+  prUrl?: string;
+  prNumber?: number;
+  prState?: string;
+}
+
+export interface QuotaLimitsSummary {
+  fiveHourPercent: number;
+  weeklyPercent: number;
+  pauseOnLimit: boolean;
+  windows: Array<{
+    runnerName: string;
+    name: string;
+    windowType: string;
+    usedPercentage: number;
+    limitPercent: number;
+    resetText?: string;
+  }>;
+  pausedRunners: Array<{ runnerName: string; resetAt: Date; reason: string }>;
+  configPath?: string;
+}
+
+export type IssueRunState = 'running' | 'paused' | 'queued' | 'idle';
+
 export interface RemoteActionController {
+  getQuotaLimits?(): QuotaLimitsSummary;
+  updateQuotaLimits?(limits: {
+    fiveHourPercent?: number;
+    weeklyPercent?: number;
+  }): Promise<{ success: boolean; message: string; limits: QuotaLimitsSummary }>;
+  getIssueLinks?(issueNumber: number): Promise<IssueLinks>;
+  getIssueState?(issueNumber: number): IssueRunState;
   replyToNeedsInfo(issueNumber: number, answer: string): Promise<void>;
   resumeQuota(runner?: string): void;
   pauseTask(issueNumber: number): Promise<{ success: boolean; message: string } | void>;
@@ -249,6 +283,7 @@ export interface QuotaPausedNotificationPayload {
   waitMinutes: number;
   runnerName?: string;
   affectedIssues?: number[];
+  reason?: string;
 }
 
 export interface QuotaResumedNotificationPayload {
@@ -269,6 +304,8 @@ export interface TelegramRemoteProviderOptions {
 export interface RemoteControlManagerOptions {
   provider: RemoteControlProvider;
   repository?: string;
+  /** Repository issues live in, when it differs from `repository`. Used for issue links. */
+  issueRepository?: string;
   defaultChatId?: number | string;
   notifications?: Partial<TelegramNotificationsConfig>;
   eventBus?: AgentEventBus;

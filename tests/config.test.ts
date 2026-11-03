@@ -55,6 +55,7 @@ describe('AutoPilotConfigSchema', () => {
         pauseOnLimit: true,
         utilizationThresholdLimit: 0.85,
         utilizationThreshold: 0.85,
+        weeklyThresholdLimit: 0.9,
         tokenCeiling: undefined,
         proxyPort: 9876,
       });
@@ -135,6 +136,7 @@ describe('AutoPilotConfigSchema', () => {
         pauseOnLimit: false,
         utilizationThresholdLimit: 0.9,
         utilizationThreshold: 0.9,
+        weeklyThresholdLimit: 0.9,
         tokenCeiling: 25000,
         proxyPort: 8080,
       });

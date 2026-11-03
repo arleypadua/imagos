@@ -9,8 +9,37 @@ export class ClaudeUsageProvider implements UsageProvider {
   private cachedRunnerUsage: RunnerLiveUsage | null = null;
   private lastFetchTime = 0;
 
+  // "Nov 9 at 9:59pm (Europe/Amsterdam)", "Nov 9, 10pm", "Aug 26": a reset with a calendar date, as the
+  // weekly window reports it. Without the date the time alone reads as today, a week early.
+  private parseDatedResetString(str: string): Date | undefined {
+    const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+    const match = str.match(
+      /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:(?:,|\s)+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?/i
+    );
+    if (!match) return undefined;
+
+    const month = MONTHS.indexOf(match[1].toLowerCase());
+    const day = parseInt(match[2], 10);
+    let hour = match[3] ? parseInt(match[3], 10) : 0;
+    const minute = match[4] ? parseInt(match[4], 10) : 0;
+    const ampm = match[5]?.toLowerCase();
+    if (ampm === 'pm' && hour < 12) hour += 12;
+    if (ampm === 'am' && hour === 12) hour = 0;
+
+    const now = new Date();
+    const target = new Date(now.getFullYear(), month, day, hour, minute, 0, 0);
+    // "Jan 2" read in late December names next year's date.
+    if (now.getTime() - target.getTime() > 30 * 24 * 60 * 60 * 1000) {
+      target.setFullYear(target.getFullYear() + 1);
+    }
+    return target;
+  }
+
   private parseResetTimeString(str: string): Date | undefined {
     const lower = str.toLowerCase();
+
+    const dated = this.parseDatedResetString(str);
+    if (dated) return dated;
 
     // 1. Check relative "resets in X hours Y minutes" or "resets in Xh Ym"
     const inHoursMatch =
@@ -105,9 +134,13 @@ export class ClaudeUsageProvider implements UsageProvider {
 
     let weekUsedPercentage: number | undefined = undefined;
     let weekResetText: string | undefined = undefined;
+    let weekResetAt: Date | undefined = undefined;
     if (weekMatch) {
       weekUsedPercentage = parseInt(weekMatch[1], 10);
       weekResetText = weekMatch[2]?.trim();
+      if (weekResetText) {
+        weekResetAt = this.parseResetTimeString(weekResetText);
+      }
     }
 
     const now = new Date();
@@ -117,6 +150,7 @@ export class ClaudeUsageProvider implements UsageProvider {
       sessionResetAt,
       weekUsedPercentage,
       weekResetText,
+      weekResetAt,
       lastFetchedAt: now,
     };
 
@@ -139,6 +173,7 @@ export class ClaudeUsageProvider implements UsageProvider {
         windowType: 'weekly',
         usedPercentage: weekUsedPercentage,
         remainingPercentage: Math.max(0, 100 - weekUsedPercentage),
+        resetAt: weekResetAt,
         resetText: weekResetText,
       });
     }

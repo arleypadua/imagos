@@ -299,6 +299,7 @@ export interface AutoPilotConfig {
     pauseOnLimit: boolean;
     utilizationThresholdLimit: number;
     utilizationThreshold?: number;
+    weeklyThresholdLimit: number;
     tokenCeiling?: number;
     proxyPort?: number;
   };
