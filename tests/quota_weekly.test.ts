@@ -14,18 +14,25 @@ Current week (Fable): 0% used · resets Nov 9 at 10pm (Europe/Amsterdam)
 
 function stubClaude(
   monitor: QuotaMonitor,
-  live: { session?: number; sessionResetAt?: Date; week?: number; weekResetAt?: Date }
+  live: {
+    session?: number;
+    sessionResetAt?: Date;
+    week?: number;
+    weekResetAt?: Date;
+    modelWeeks?: Array<{ model: string; usedPercentage: number; resetAt?: Date }>;
+  }
 ): void {
   const claude = monitor.getProvider('claude') as any;
   claude.fetchUsage = async () => null;
   claude.isAvailable = async () => true;
   claude.getCachedLiveUsage = () => ({
-    sessionUsedPercentage: live.session ?? 0,
+    sessionUsedPercentage: live.session,
     sessionResetAt: live.sessionResetAt,
     sessionResetText: live.sessionResetAt ? 'soon' : undefined,
     weekUsedPercentage: live.week,
     weekResetAt: live.weekResetAt,
     weekResetText: live.weekResetAt ? 'Nov 9 at 9:59pm' : undefined,
+    modelWeeks: live.modelWeeks,
     lastFetchedAt: new Date(),
   });
   const agy = monitor.getProvider('agy') as any;
@@ -58,6 +65,61 @@ describe('Claude /usage weekly window', () => {
   });
 });
 
+// Accounts without a 5h limit: `/usage` prints only the weekly windows.
+const USAGE_WITHOUT_SESSION = `You are currently using your subscription to power your Claude Code usage
+
+Current week (all models): 1% used · resets Nov 16 at 10pm (Europe/Amsterdam)
+Current week (Fable): 0% used · resets Nov 16 at 10pm (Europe/Amsterdam)
+
+What's contributing to your usage?
+Approximate · sessions on this machine only · shares overlap
+
+Last 24h · 695 requests · 8 sessions
+  11%  Run fewer sessions at once · up to 5 at once
+`;
+
+describe('Claude /usage without a 5h session limit', () => {
+  it('leaves the session window out instead of reading it as 0%', () => {
+    const { liveUsage, runnerUsage } = new ClaudeUsageProvider().parseUsageOutput(USAGE_WITHOUT_SESSION);
+
+    expect(liveUsage.sessionUsedPercentage).toBeUndefined();
+    expect(liveUsage.sessionResetAt).toBeUndefined();
+    expect(runnerUsage.buckets.some((b) => b.windowType === 'five_hour')).toBe(false);
+    expect(liveUsage.weekUsedPercentage).toBe(1);
+    expect(liveUsage.weekResetAt?.getDate()).toBe(16);
+  });
+
+  it('reads the Fable weekly window as its own bucket', () => {
+    const { liveUsage, runnerUsage } = new ClaudeUsageProvider().parseUsageOutput(USAGE_WITHOUT_SESSION);
+
+    expect(liveUsage.modelWeeks).toHaveLength(1);
+    expect(liveUsage.modelWeeks![0]).toMatchObject({ model: 'Fable', usedPercentage: 0 });
+    expect(liveUsage.modelWeeks![0].resetAt?.getHours()).toBe(22);
+    expect(runnerUsage.buckets.map((b) => b.name)).toEqual(['Weekly', 'Weekly (Fable)']);
+  });
+
+  it('keeps the all-models week apart from the Fable week', () => {
+    const { liveUsage } = new ClaudeUsageProvider().parseUsageOutput(
+      'Current week (Fable): 70% used · resets Nov 16 at 10pm\nCurrent week (all models): 20% used · resets Nov 15 at 9pm'
+    );
+    expect(liveUsage.weekUsedPercentage).toBe(20);
+    expect(liveUsage.modelWeeks?.map((m) => m.usedPercentage)).toEqual([70]);
+  });
+
+  it('has no model weeks when the account has none', () => {
+    const { liveUsage } = new ClaudeUsageProvider().parseUsageOutput(REAL_USAGE.replace(/^Current week \(Fable\).*$/m, ''));
+    expect(liveUsage.modelWeeks).toBeUndefined();
+  });
+
+  it('takes a limit message reset from its own line, not the weekly line above it', () => {
+    const { liveUsage } = new ClaudeUsageProvider().parseUsageOutput(
+      "Current week (all models): 40% used · resets Nov 16 at 10pm\nYou've hit your usage limit · resets 11am"
+    );
+    expect(liveUsage.sessionUsedPercentage).toBe(100);
+    expect(liveUsage.sessionResetText).toBe('11am');
+  });
+});
+
 describe('QuotaMonitor weekly limit', () => {
   it('defaults the weekly limit to 90%', () => {
     expect(new QuotaMonitor().getThresholds()).toEqual({ fiveHourPercent: 85, weeklyPercent: 90 });
@@ -83,6 +145,33 @@ describe('QuotaMonitor weekly limit', () => {
     await monitor.fetchLiveUsage();
 
     expect(monitor.isRunnerPaused('claude')).toBe(true);
+  });
+
+  it('pauses until the Fable reset once the Fable week passes the weekly limit', async () => {
+    const monitor = new QuotaMonitor();
+    const fableResetAt = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+    stubClaude(monitor, {
+      week: 30,
+      weekResetAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      modelWeeks: [{ model: 'Fable', usedPercentage: 92, resetAt: fableResetAt }],
+    });
+
+    await monitor.fetchLiveUsage();
+
+    expect(monitor.isRunnerPaused('claude')).toBe(true);
+    expect(monitor.getStatus().reason).toContain('Fable');
+    expect(monitor.getStatus().pausedRunners?.claude.resetAt.getTime()).toBe(
+      fableResetAt.getTime() + DEFAULT_RESET_BUFFER_MS
+    );
+  });
+
+  it('keeps running while the Fable week is under the weekly limit', async () => {
+    const monitor = new QuotaMonitor();
+    stubClaude(monitor, { week: 30, modelWeeks: [{ model: 'Fable', usedPercentage: 50 }] });
+
+    await monitor.fetchLiveUsage();
+
+    expect(monitor.isRunnerPaused('claude')).toBe(false);
   });
 
   it('keeps running below the weekly limit', async () => {

@@ -436,10 +436,11 @@ export class QuotaMonitor extends EventEmitter {
     const claudeLive = (await this.claudeProvider.isAvailable()) ? this.claudeProvider.getCachedLiveUsage() : null;
 
     // Claude: the 5h session window and the weekly window each have their own limit. The session line is
-    // missing whenever the 5h limit is lifted, and the weekly limit is then the only one standing.
+    // missing whenever the 5h limit is lifted, and the weekly limits are then the only ones standing. A
+    // weekly cap on a single model (e.g. Fable) is held to the weekly limit too.
     if (this.isRunnerAllowed('claude') && claudeLive && shouldPauseOnLimit) {
       const breaches: Array<{ resetAt: Date; reason: string }> = [];
-      if (claudeLive.sessionUsedPercentage >= fiveHourPercent) {
+      if (claudeLive.sessionUsedPercentage !== undefined && claudeLive.sessionUsedPercentage >= fiveHourPercent) {
         breaches.push({
           resetAt: claudeLive.sessionResetAt || new Date(Date.now() + 60 * 60 * 1000),
           reason: `Claude Live Session Quota: ${claudeLive.sessionUsedPercentage}% used (threshold: ${fiveHourPercent}%, resets ${claudeLive.sessionResetText || 'soon'})`,
@@ -450,6 +451,14 @@ export class QuotaMonitor extends EventEmitter {
           resetAt: claudeLive.weekResetAt || new Date(Date.now() + 60 * 60 * 1000),
           reason: `Claude Weekly Quota: ${claudeLive.weekUsedPercentage}% used (weekly threshold: ${weeklyPercent}%, resets ${claudeLive.weekResetText || 'soon'})`,
         });
+      }
+      for (const mw of claudeLive.modelWeeks ?? []) {
+        if (mw.usedPercentage >= weeklyPercent) {
+          breaches.push({
+            resetAt: mw.resetAt || new Date(Date.now() + 60 * 60 * 1000),
+            reason: `Claude Weekly Quota (${mw.model}): ${mw.usedPercentage}% used (weekly threshold: ${weeklyPercent}%, resets ${mw.resetText || 'soon'})`,
+          });
+        }
       }
       this.applyThresholdBreaches('claude', breaches, claudeLive.sessionResetAt ? [claudeLive.sessionResetAt] : []);
     }

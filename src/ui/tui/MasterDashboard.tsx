@@ -115,23 +115,33 @@ export const MasterDashboard: React.FC<MasterDashboardProps> = ({
       }
     } else if (quotaStatus.liveUsage && isRunnerAllowed('claude')) {
       const live = quotaStatus.liveUsage;
-      const sessPct = live.sessionUsedPercentage;
       const barLen = 12;
-      const sessFilled = Math.min(barLen, Math.max(0, Math.round((sessPct / 100) * barLen)));
-      const sessBar = '█'.repeat(sessFilled) + '░'.repeat(Math.max(0, barLen - sessFilled));
-      const sessColor = sessPct >= 100 ? 'red' : sessPct >= 80 ? 'yellow' : 'green';
+      const rows: Array<{ label: string; pct: number; resetText?: string; weekly: boolean }> = [];
+      if (live.sessionUsedPercentage !== undefined) {
+        rows.push({ label: '5h Session Quota:', pct: live.sessionUsedPercentage, resetText: live.sessionResetText, weekly: false });
+      }
+      if (live.weekUsedPercentage !== undefined) {
+        rows.push({ label: 'Weekly Quota:', pct: live.weekUsedPercentage, resetText: live.weekResetText, weekly: true });
+      }
+      for (const mw of live.modelWeeks ?? []) {
+        rows.push({ label: `Weekly (${mw.model}):`, pct: mw.usedPercentage, resetText: mw.resetText, weekly: true });
+      }
 
       telemetryBars = (
         <Box flexDirection="column">
-          <Text color={sessColor}>
-            ● 5h Session Quota: [{sessBar}] {sessPct}% used
-            {live.sessionResetText ? ` · Resets ${live.sessionResetText}` : ''}
-          </Text>
-          {live.weekUsedPercentage !== undefined && (
-            <Text color={live.weekUsedPercentage >= 90 ? 'red' : 'cyan'}>
-              ● Weekly Quota:    [{'█'.repeat(Math.min(12, Math.round((live.weekUsedPercentage / 100) * 12))) + '░'.repeat(Math.max(0, 12 - Math.round((live.weekUsedPercentage / 100) * 12)))}] {live.weekUsedPercentage}% used
-            </Text>
-          )}
+          {rows.map((row) => {
+            const filled = Math.min(barLen, Math.max(0, Math.round((row.pct / 100) * barLen)));
+            const bar = '█'.repeat(filled) + '░'.repeat(Math.max(0, barLen - filled));
+            const color = row.weekly
+              ? row.pct >= 90 ? 'red' : 'cyan'
+              : row.pct >= 100 ? 'red' : row.pct >= 80 ? 'yellow' : 'green';
+            return (
+              <Text key={row.label} color={color}>
+                ● {row.label.padEnd(18)} [{bar}] {row.pct}% used
+                {row.resetText ? ` · Resets ${row.resetText}` : ''}
+              </Text>
+            );
+          })}
         </Box>
       );
     } else if (!pauseBanner) {

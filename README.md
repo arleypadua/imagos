@@ -302,8 +302,8 @@ Running `imagos init` creates `.autopilot/config.json`. You can customize it to 
 - `mergeMethod`: Method used when merging pull requests (`squash`, `merge`, or `rebase`).
 - `cleanupWorktreeOnClose`: Whether to delete the worktree folder once an issue is closed and merged (defaults to `true`).
 - `quota.pauseOnLimit`: Whether to automatically pause task execution when the quota threshold is reached (defaults to `true`).
-- `quota.utilizationThresholdLimit`: Share of the 5h session window a runner may use before its workers pause (defaults to `0.85`, e.g. `0.70` for 70%).
-- `quota.weeklyThresholdLimit`: Share of the weekly window a runner may use before its workers pause until the week resets (defaults to `0.9`). This limit still applies when the 5h limit is lifted.
+- `quota.utilizationThresholdLimit`: Share of the 5h session window a runner may use before its workers pause (defaults to `0.85`, e.g. `0.70` for 70%); it applies only to accounts that still have a 5h window.
+- `quota.weeklyThresholdLimit`: Share of the weekly window a runner may use before its workers pause until the week resets (defaults to `0.9`). This limit still applies when the 5h limit is lifted, and also covers per-model weekly windows such as Claude's `Current week (Fable)`.
 
 Both limits can be changed while the daemon runs, with `imagos limits --weekly 90 --5h 85`, from Telegram with `/limits` (or the ⚙️ Limits buttons), or by editing the config file. The daemon picks the change up within a few seconds and the new values are saved to `.autopilot/config.json`.
 - `labels`: Mapping of canonical workflow labels to custom label names if your repository uses different names.

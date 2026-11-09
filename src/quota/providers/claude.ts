@@ -1,6 +1,6 @@
 import { execa } from 'execa';
 import { rollForwardIfStale } from '../types.js';
-import type { ClaudeLiveUsage, QuotaBucket, RunnerLiveUsage, UsageProvider } from '../types.js';
+import type { ClaudeLiveUsage, ClaudeModelWeek, QuotaBucket, RunnerLiveUsage, UsageProvider } from '../types.js';
 
 export class ClaudeUsageProvider implements UsageProvider {
   public readonly name = 'claude';
@@ -94,7 +94,9 @@ export class ClaudeUsageProvider implements UsageProvider {
     const sessionMatch = stdout.match(/Current session:\s*(\d+)%\s*used(?:\s*·\s*resets\s*([^\n\r]+))?/i);
     const weekMatch = stdout.match(/Current week(?:\s*\(all models\))?:\s*(\d+)%\s*used(?:\s*·\s*resets\s*([^\n\r]+))?/i);
 
-    let sessionUsedPercentage = 0;
+    // The 5h session line is gone on accounts without a session limit, so it stays undefined rather than
+    // reading as 0% of a limit that does not exist.
+    let sessionUsedPercentage: number | undefined = undefined;
     let sessionResetText: string | undefined = undefined;
     let sessionResetAt: Date | undefined = undefined;
 
@@ -105,8 +107,6 @@ export class ClaudeUsageProvider implements UsageProvider {
         sessionResetAt = this.parseResetTimeString(sessionResetText);
       }
     } else {
-      // Check if session limit string is present in stdout
-      const lower = stdout.toLowerCase();
       const limitPatterns = [
         'session limit',
         'hit your session limit',
@@ -117,10 +117,13 @@ export class ClaudeUsageProvider implements UsageProvider {
         'hit your usage limit',
         'quota exceeded',
       ];
-      const isLimitHit = limitPatterns.some((pattern) => lower.includes(pattern));
-      if (isLimitHit) {
+      // The reset belongs to the line that reports the limit, not to a weekly line printed beside it.
+      const limitLine = stdout
+        .split(/\r?\n/)
+        .find((line) => limitPatterns.some((pattern) => line.toLowerCase().includes(pattern)));
+      if (limitLine !== undefined) {
         sessionUsedPercentage = 100;
-        const resetMatch = stdout.match(/resets\s+([^\n\r]+)/i);
+        const resetMatch = limitLine.match(/resets\s+(.+)/i);
         if (resetMatch) {
           sessionResetText = resetMatch[1]?.trim();
           sessionResetAt = this.parseResetTimeString(sessionResetText);
@@ -143,6 +146,20 @@ export class ClaudeUsageProvider implements UsageProvider {
       }
     }
 
+    // Weekly caps on a single model, such as `Current week (Fable)`, printed only for accounts that have them.
+    const modelWeeks: ClaudeModelWeek[] = [];
+    for (const m of stdout.matchAll(/Current week\s*\(([^)]+)\):\s*(\d+)%\s*used(?:\s*·\s*resets\s*([^\n\r]+))?/gi)) {
+      const model = m[1].trim();
+      if (model.toLowerCase() === 'all models') continue;
+      const resetText = m[3]?.trim();
+      modelWeeks.push({
+        model,
+        usedPercentage: parseInt(m[2], 10),
+        resetText,
+        resetAt: resetText ? this.parseResetTimeString(resetText) : undefined,
+      });
+    }
+
     const now = new Date();
     const liveUsage: ClaudeLiveUsage = {
       sessionUsedPercentage,
@@ -151,11 +168,14 @@ export class ClaudeUsageProvider implements UsageProvider {
       weekUsedPercentage,
       weekResetText,
       weekResetAt,
+      modelWeeks: modelWeeks.length > 0 ? modelWeeks : undefined,
       lastFetchedAt: now,
     };
 
-    const buckets: QuotaBucket[] = [
-      {
+    const buckets: QuotaBucket[] = [];
+
+    if (sessionUsedPercentage !== undefined) {
+      buckets.push({
         name: 'Session 5h',
         group: 'Claude Models',
         windowType: 'five_hour',
@@ -163,8 +183,8 @@ export class ClaudeUsageProvider implements UsageProvider {
         remainingPercentage: Math.max(0, 100 - sessionUsedPercentage),
         resetAt: sessionResetAt,
         resetText: sessionResetText,
-      },
-    ];
+      });
+    }
 
     if (weekUsedPercentage !== undefined) {
       buckets.push({
@@ -175,6 +195,18 @@ export class ClaudeUsageProvider implements UsageProvider {
         remainingPercentage: Math.max(0, 100 - weekUsedPercentage),
         resetAt: weekResetAt,
         resetText: weekResetText,
+      });
+    }
+
+    for (const mw of modelWeeks) {
+      buckets.push({
+        name: `Weekly (${mw.model})`,
+        group: 'Claude Models',
+        windowType: 'weekly',
+        usedPercentage: mw.usedPercentage,
+        remainingPercentage: Math.max(0, 100 - mw.usedPercentage),
+        resetAt: mw.resetAt,
+        resetText: mw.resetText,
       });
     }
 

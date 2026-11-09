@@ -39,13 +39,23 @@ export interface UsageProvider {
   isAvailable?(): Promise<boolean>;
 }
 
+/** A weekly cap on one model, e.g. `Current week (Fable)`, on top of the all-models weekly cap. */
+export interface ClaudeModelWeek {
+  model: string;
+  usedPercentage: number;
+  resetText?: string;
+  resetAt?: Date;
+}
+
 export interface ClaudeLiveUsage {
-  sessionUsedPercentage: number;
+  /** Absent on accounts without a 5h session limit; the weekly limits are then the only ones. */
+  sessionUsedPercentage?: number;
   sessionResetText?: string;
   sessionResetAt?: Date;
   weekUsedPercentage?: number;
   weekResetText?: string;
   weekResetAt?: Date;
+  modelWeeks?: ClaudeModelWeek[];
   lastFetchedAt: Date;
 }
 

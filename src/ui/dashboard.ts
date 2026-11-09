@@ -127,30 +127,29 @@ export class Dashboard {
       }
     } else if (quotaStatus.liveUsage && isRunnerAllowed('claude')) {
       const live = quotaStatus.liveUsage;
-      const sessPct = live.sessionUsedPercentage;
       const barLen = 12;
-
-      const sessFilled = Math.min(barLen, Math.round((sessPct / 100) * barLen));
-      const sessBar = '█'.repeat(sessFilled) + '░'.repeat(Math.max(0, barLen - sessFilled));
-      const sessColor = sessPct >= 100 ? pc.red : sessPct >= 80 ? pc.yellow : pc.green;
-
-      let sessLine = sessColor(`● 5h Session Quota: [${sessBar}] ${sessPct}% used`);
-      if (live.sessionResetText) {
-        sessLine += pc.gray(` · Resets ${live.sessionResetText}`);
+      const rows: Array<{ label: string; pct: number; resetText?: string; weekly: boolean }> = [];
+      if (live.sessionUsedPercentage !== undefined) {
+        rows.push({ label: '5h Session Quota:', pct: live.sessionUsedPercentage, resetText: live.sessionResetText, weekly: false });
       }
-      console.log(sessLine);
-
       if (live.weekUsedPercentage !== undefined) {
-        const weekPct = live.weekUsedPercentage;
-        const weekFilled = Math.min(barLen, Math.round((weekPct / 100) * barLen));
-        const weekBar = '█'.repeat(weekFilled) + '░'.repeat(Math.max(0, barLen - weekFilled));
-        const weekColor = weekPct >= 90 ? pc.red : weekPct >= 70 ? pc.yellow : pc.cyan;
+        rows.push({ label: 'Weekly Quota:', pct: live.weekUsedPercentage, resetText: live.weekResetText, weekly: true });
+      }
+      for (const mw of live.modelWeeks ?? []) {
+        rows.push({ label: `Weekly (${mw.model}):`, pct: mw.usedPercentage, resetText: mw.resetText, weekly: true });
+      }
 
-        let weekLine = weekColor(`● Weekly Quota:    [${weekBar}] ${weekPct}% used`);
-        if (live.weekResetText) {
-          weekLine += pc.gray(` · Resets ${live.weekResetText}`);
+      for (const row of rows) {
+        const filled = Math.min(barLen, Math.max(0, Math.round((row.pct / 100) * barLen)));
+        const bar = '█'.repeat(filled) + '░'.repeat(Math.max(0, barLen - filled));
+        const color = row.weekly
+          ? row.pct >= 90 ? pc.red : row.pct >= 70 ? pc.yellow : pc.cyan
+          : row.pct >= 100 ? pc.red : row.pct >= 80 ? pc.yellow : pc.green;
+        let line = color(`● ${row.label.padEnd(18)} [${bar}] ${row.pct}% used`);
+        if (row.resetText) {
+          line += pc.gray(` · Resets ${row.resetText}`);
         }
-        console.log(weekLine);
+        console.log(line);
       }
     } else {
       console.log(pc.green('● Quota Status: Normal (headroom healthy)'));

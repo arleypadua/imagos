@@ -105,30 +105,27 @@ export const UsageView: React.FC<UsageViewProps> = ({
           <Text bold color="cyan">
             ⚡ CLAUDE CODE CLI TELEMETRY
           </Text>
-          <Box flexDirection="column" marginTop={0}>
-            <Text bold color="white">5-Hour Session Quota:</Text>
-            <Box flexDirection="row">
-              <Box width={32}>
-                {renderProgressBar(quotaStatus.liveUsage.sessionUsedPercentage, 20)}
-              </Box>
-              {quotaStatus.liveUsage.sessionResetText && (
-                <Text color="gray">Resets: {quotaStatus.liveUsage.sessionResetText}</Text>
-              )}
-            </Box>
-          </Box>
-          {quotaStatus.liveUsage.weekUsedPercentage !== undefined && (
-            <Box flexDirection="column" marginTop={1}>
-              <Text bold color="white">Weekly Account Quota:</Text>
+          {[
+            ...(quotaStatus.liveUsage.sessionUsedPercentage !== undefined
+              ? [{ label: '5-Hour Session Quota:', pct: quotaStatus.liveUsage.sessionUsedPercentage, resetText: quotaStatus.liveUsage.sessionResetText }]
+              : []),
+            ...(quotaStatus.liveUsage.weekUsedPercentage !== undefined
+              ? [{ label: 'Weekly Account Quota:', pct: quotaStatus.liveUsage.weekUsedPercentage, resetText: quotaStatus.liveUsage.weekResetText }]
+              : []),
+            ...(quotaStatus.liveUsage.modelWeeks ?? []).map((mw) => ({
+              label: `Weekly ${mw.model} Quota:`,
+              pct: mw.usedPercentage,
+              resetText: mw.resetText,
+            })),
+          ].map((row, i) => (
+            <Box key={row.label} flexDirection="column" marginTop={i === 0 ? 0 : 1}>
+              <Text bold color="white">{row.label}</Text>
               <Box flexDirection="row">
-                <Box width={32}>
-                  {renderProgressBar(quotaStatus.liveUsage.weekUsedPercentage, 20)}
-                </Box>
-                {quotaStatus.liveUsage.weekResetText && (
-                  <Text color="gray">Resets: {quotaStatus.liveUsage.weekResetText}</Text>
-                )}
+                <Box width={32}>{renderProgressBar(row.pct, 20)}</Box>
+                {row.resetText && <Text color="gray">Resets: {row.resetText}</Text>}
               </Box>
             </Box>
-          )}
+          ))}
         </Box>
       ) : (
         <Box borderStyle="single" borderColor="green" paddingX={1} marginBottom={1}>
